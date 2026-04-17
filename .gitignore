@@ -1,0 +1,53 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- PyInstaller build artifacts ---
+build/
+dist/
+*.spec
+*.manifest
+
+# --- Bundled Tesseract (users install their own or we ship via build.py) ---
+Tesseract-OCR/
+
+# --- Runtime debug output ---
+debug/
+*.log
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# --- Local config overrides (keep the shared one) ---
+config.local.json
+settings.local.json
+
+# --- Large test captures / installer downloads ---
+*.exe
+!Dota2Translate.exe
+tesseract-setup*.exe
+frame_*.png

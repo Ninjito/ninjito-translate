@@ -1,0 +1,24 @@
+{
+  "chat_region_relative": {
+    "left": 592,
+    "top": 607,
+    "width": 765,
+    "height": 151
+  },
+  "ocr_language": "ru",
+  "target_language": "en",
+  "idle_poll_ms": 150,
+  "preprocess": true,
+  "debug": true,
+  "require_dota_foreground": false,
+  "capture_mode": "printwindow",
+  "overlay": {
+    "x": 50,
+    "y": 50,
+    "width": 640,
+    "height": 90,
+    "font_size": 11,
+    "alpha": 0.55,
+    "max_messages": 5
+  }
+}
