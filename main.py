@@ -38,6 +38,47 @@ if _sys.platform == "win32":
 
     _sp.Popen.__init__ = _silent_popen_init
 
+    # Tell Windows this is a distinct app so the taskbar uses gg.ico
+    # instead of the generic python.exe icon.
+    try:
+        import ctypes as _ct
+        _ct.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "Ninja.Dota2Translate.1"
+        )
+    except Exception:
+        pass
+
+    # --- Single-instance guard ---
+    # Create a named mutex; if it already exists, another copy of the app
+    # is running.  In that case we try to bring its window to the front
+    # and exit immediately — clicking the .exe again just "focuses" it.
+    try:
+        import ctypes as _ct
+        from ctypes import wintypes as _wt
+        _k32 = _ct.windll.kernel32
+        _u32 = _ct.windll.user32
+        _ERROR_ALREADY_EXISTS = 183
+        _MUTEX_NAME = "Global\\Dota2Translate_SingleInstance_Mutex"
+        _k32.CreateMutexW.argtypes = [_wt.LPVOID, _wt.BOOL, _wt.LPCWSTR]
+        _k32.CreateMutexW.restype = _wt.HANDLE
+        _mutex = _k32.CreateMutexW(None, True, _MUTEX_NAME)
+        if _k32.GetLastError() == _ERROR_ALREADY_EXISTS:
+            # Try to raise the existing window.
+            try:
+                _u32.FindWindowW.argtypes = [_wt.LPCWSTR, _wt.LPCWSTR]
+                _u32.FindWindowW.restype = _wt.HWND
+                hwnd = _u32.FindWindowW(None, "Dota 2 Translate")
+                if hwnd:
+                    _u32.ShowWindow(hwnd, 9)   # SW_RESTORE
+                    _u32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+            _sys.exit(0)
+        # Keep a reference so the mutex lives for the process lifetime.
+        globals()["_SINGLE_INSTANCE_MUTEX"] = _mutex
+    except Exception:
+        pass
+
 import hashlib
 import json
 import sys

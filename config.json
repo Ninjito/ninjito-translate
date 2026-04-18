@@ -16,11 +16,11 @@
   "overlay": {
     "x": 600,
     "y": 790,
-    "width":700,
+    "width": 700,
     "height": 90,
     "font_size": 11,
     "alpha": 0.55,
     "max_messages": 5,
-    "hotkey_vk": 118
+    "hotkey_vk": 117
   }
 }

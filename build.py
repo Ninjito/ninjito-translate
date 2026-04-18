@@ -40,33 +40,65 @@ def find_tesseract_dir() -> Path:
     )
 
 
+def _kill_running_app() -> None:
+    """Kill any running Dota2Translate.exe so we can overwrite its files."""
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", f"{APP_NAME}.exe", "/T"],
+            check=False, capture_output=True,
+        )
+    except Exception:
+        pass
+
+
 def clean() -> None:
+    _kill_running_app()
     for p in (DIST, BUILD):
         if p.exists():
             print(f"  cleaning {p}")
-            shutil.rmtree(p, ignore_errors=True)
-    spec = ROOT / f"{APP_NAME}.spec"
-    if spec.exists():
-        spec.unlink()
+            # Retry a couple of times: Windows sometimes keeps file handles
+            # around for a moment after the process exits.
+            import time
+            for attempt in range(5):
+                try:
+                    shutil.rmtree(p)
+                    break
+                except PermissionError:
+                    time.sleep(0.6)
+                    _kill_running_app()
+            else:
+                shutil.rmtree(p, ignore_errors=True)
+    # IMPORTANT: do NOT delete the .spec — it holds our icon + bundled
+    # assets (gg.png / gg.ico) config.  We keep it and build from it.
 
 
 def run_pyinstaller() -> None:
-    cmd = [
-        sys.executable, "-m", "PyInstaller",
-        "--name", APP_NAME,
-        "--noconsole",          # no black console window
-        "--onedir",             # folder, not single-file (faster startup)
-        "--clean",
-        "--noconfirm",
-        # Hidden imports that PyInstaller might miss
-        "--hidden-import", "pytesseract",
-        "--hidden-import", "deep_translator",
-        "--hidden-import", "PIL",
-        "--hidden-import", "cv2",
-        "--hidden-import", "mss",
-        # Entry point
-        str(ROOT / "main.py"),
-    ]
+    spec = ROOT / f"{APP_NAME}.spec"
+    if spec.exists():
+        # Build from spec so icon + datas (gg.png / gg.ico) are honored.
+        cmd = [
+            sys.executable, "-m", "PyInstaller",
+            "--clean", "--noconfirm",
+            str(spec),
+        ]
+    else:
+        # First-ever build: generate a spec inline.  Next run will reuse it.
+        cmd = [
+            sys.executable, "-m", "PyInstaller",
+            "--name", APP_NAME,
+            "--noconsole",
+            "--onedir",
+            "--clean", "--noconfirm",
+            "--icon", str(ROOT / "gg.ico"),
+            "--add-data", f"{ROOT / 'gg.png'}{os.pathsep}.",
+            "--add-data", f"{ROOT / 'gg.ico'}{os.pathsep}.",
+            "--hidden-import", "pytesseract",
+            "--hidden-import", "deep_translator",
+            "--hidden-import", "PIL",
+            "--hidden-import", "cv2",
+            "--hidden-import", "mss",
+            str(ROOT / "main.py"),
+        ]
     print("[build] Running PyInstaller...")
     subprocess.run(cmd, check=True, cwd=ROOT)
 

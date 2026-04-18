@@ -10,10 +10,114 @@ Controls:
 from __future__ import annotations
 
 import ctypes
+import os
 import queue
+import sys
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk
+
+
+def _resource_path(name: str) -> str:
+    """Locate a bundled resource both in dev and under PyInstaller.
+
+    Looks in sys._MEIPASS (frozen), then next to the executable,
+    then next to the project root (source run)."""
+    candidates = []
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        candidates.append(Path(base) / name)
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).parent / name)
+    here = Path(__file__).resolve().parent
+    candidates.append(here.parent / name)
+    candidates.append(here / name)
+    for p in candidates:
+        if p.is_file():
+            return str(p)
+    return name  # last-ditch relative fallback
+
+
+# Cache for the brand icon, loaded lazily once the Tk root exists.
+_BRAND_IMG = {"icon": None, "thumb": None}
+
+
+def _set_dark_titlebar(win: tk.Misc) -> None:
+    """Switch a Tk window's native Windows titlebar to dark mode.
+
+    The HWND sometimes isn't fully realized right after creation, so we
+    run once now and again on a short delay, and also force a frame
+    redraw so Windows actually repaints the non-client area."""
+    def _apply():
+        try:
+            win.update_idletasks()
+            hwnd = int(win.winfo_id())
+            GetParent = ctypes.windll.user32.GetParent
+            GetParent.restype = ctypes.c_void_p
+            GetParent.argtypes = [ctypes.c_void_p]
+            parent = GetParent(hwnd)
+            if parent:
+                hwnd = parent
+            dwm = ctypes.windll.dwmapi
+            value = ctypes.c_int(1)
+            # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE (Win10 2004+ / Win11)
+            # 19 = pre-20H1 attribute; try both.
+            for attr in (20, 19):
+                try:
+                    dwm.DwmSetWindowAttribute(
+                        ctypes.c_void_p(hwnd),
+                        ctypes.c_int(attr),
+                        ctypes.byref(value),
+                        ctypes.sizeof(value),
+                    )
+                except Exception:
+                    pass
+            # Force the non-client area to redraw so the dark bar shows
+            # up immediately (SetWindowPos + SWP_FRAMECHANGED).
+            try:
+                SWP_NOMOVE = 0x0002; SWP_NOSIZE = 0x0001
+                SWP_NOZORDER = 0x0004; SWP_FRAMECHANGED = 0x0020
+                ctypes.windll.user32.SetWindowPos(
+                    ctypes.c_void_p(hwnd), None, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
+    _apply()
+    # Re-apply once the window is fully mapped so late-created Toplevels
+    # (e.g. Paste & Translate) also get the dark bar.
+    try:
+        win.after(50, _apply)
+        win.after(300, _apply)
+    except Exception:
+        pass
+
+
+def _load_brand_icon(root: tk.Misc) -> tuple[tk.PhotoImage | None, tk.PhotoImage | None]:
+    """Return (full_icon, small_thumb) PhotoImages for the app, or (None, None)."""
+    if _BRAND_IMG["icon"] is not None:
+        return _BRAND_IMG["icon"], _BRAND_IMG["thumb"]
+    path = _resource_path("gg.png")
+    if not os.path.isfile(path):
+        return None, None
+    try:
+        # Prefer Pillow for high-quality resize; fall back to tk.PhotoImage.
+        try:
+            from PIL import Image, ImageTk
+            img = Image.open(path).convert("RGBA")
+            icon = ImageTk.PhotoImage(img.resize((64, 64), Image.LANCZOS), master=root)
+            thumb = ImageTk.PhotoImage(img.resize((20, 20), Image.LANCZOS), master=root)
+        except Exception:
+            icon = tk.PhotoImage(master=root, file=path)
+            thumb = icon.subsample(max(1, icon.width() // 20))
+        _BRAND_IMG["icon"] = icon
+        _BRAND_IMG["thumb"] = thumb
+        return icon, thumb
+    except Exception:
+        return None, None
 
 
 # Map common Virtual-Key codes to readable names.
@@ -79,10 +183,31 @@ class Overlay:
         self.root.configure(bg="#0a0a0a")
         self.root.geometry(f"{width}x{height}+{x}+{y}")
 
+        # --- Brand icon (window + taskbar) ---
+        brand_icon, brand_thumb = _load_brand_icon(self.root)
+        if brand_icon is not None:
+            try:
+                self.root.iconphoto(True, brand_icon)
+            except Exception:
+                pass
+            # Also try the .ico on Windows for a sharper taskbar/titlebar icon.
+            try:
+                ico_path = _resource_path("gg.ico")
+                if os.path.isfile(ico_path):
+                    self.root.iconbitmap(default=ico_path)
+            except Exception:
+                pass
+        self._brand_icon = brand_icon    # keep refs alive
+        self._brand_thumb = brand_thumb
+
         # --- Top bar with Translate button ---
         bar = tk.Frame(self.root, bg="#151515", height=28)
         bar.pack(fill="x")
         bar.pack_propagate(False)
+
+        if self._brand_thumb is not None:
+            tk.Label(bar, image=self._brand_thumb, bg="#151515",
+                     borderwidth=0).pack(side="left", padx=(6, 2), pady=2)
 
         self._btn = tk.Button(
             bar,
@@ -180,7 +305,7 @@ class Overlay:
 
         self._status = tk.Label(
             bar,
-            text="Press button or F7 to translate",
+            text=f"Press button or {self._hotkey_name} to translate",
             bg="#151515",
             fg="#555",
             font=("Consolas", 8),
@@ -403,7 +528,14 @@ class Overlay:
             text=f"🎹 {self._hotkey_name}", bg="#2a2a1a"
         )
         self._request_hotkey_reregister()
+        # Show confirmation briefly, then fall back to the dynamic
+        # placeholder matching the new key.
         self.set_status(f"Hotkey set to {self._hotkey_name}", "#7bd88f")
+        placeholder = f"Press button or {self._hotkey_name} to translate"
+        self.root.after(
+            1800,
+            lambda p=placeholder: self._status.configure(text=p, fg="#555"),
+        )
         if self._on_hotkey_changed is not None:
             try:
                 self._on_hotkey_changed(new_vk, self._hotkey_name)
@@ -532,6 +664,17 @@ class Overlay:
     # ---- close ----
     def _close(self) -> None:
         self._closing = True
+        # Close any auxiliary windows (logs, paste) so they don't linger
+        # as orphan Toplevels after the main overlay is destroyed.
+        for attr in ("_logs_window", "_paste_window"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try:
+                    if w.winfo_exists():
+                        w.destroy()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
         try:
             self.root.destroy()
         except Exception:
@@ -651,6 +794,22 @@ class Overlay:
         win = tk.Toplevel(self.root)
         self._logs_window = win
         win.title("Translation history")
+        # Apply dark title bar FIRST so DWM doesn't wipe our icon after.
+        _set_dark_titlebar(win)
+
+        def _apply_icon(w=win):
+            try:
+                if self._brand_icon is not None:
+                    w.iconphoto(False, self._brand_icon)
+                ico = _resource_path("gg.ico")
+                if os.path.isfile(ico):
+                    w.iconbitmap(ico)
+            except Exception:
+                pass
+        _apply_icon()
+        # Reapply after DWM finishes its dark-mode repaint so the icon
+        # sticks in the title bar corner.
+        win.after(150, _apply_icon)
         win.configure(bg="#0a0a0a")
         win.geometry("760x520")
         win.attributes("-topmost", True)
@@ -813,6 +972,22 @@ class Overlay:
         win = tk.Toplevel(self.root)
         self._paste_window = win
         win.title("Paste & Translate")
+        # Apply dark title bar FIRST so DWM doesn't wipe our icon after.
+        _set_dark_titlebar(win)
+
+        def _apply_icon(w=win):
+            try:
+                if self._brand_icon is not None:
+                    w.iconphoto(False, self._brand_icon)
+                ico = _resource_path("gg.ico")
+                if os.path.isfile(ico):
+                    w.iconbitmap(ico)
+            except Exception:
+                pass
+        _apply_icon()
+        # Reapply after DWM finishes its dark-mode repaint so the icon
+        # sticks in the title bar corner.
+        win.after(150, _apply_icon)
         win.configure(bg="#0a0a0a")
         win.geometry("700x340")
         win.resizable(True, True)
