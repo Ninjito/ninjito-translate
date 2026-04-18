@@ -59,7 +59,9 @@ class Overlay:
         hotkey_vk: int = 0x76,  # F7
         on_recalibrate=None,  # callback(new_relative_bbox: dict) when user resizes
         on_hotkey_changed=None,  # callback(new_vk: int, name: str) on rebind
+        cfg: dict = None,
     ):
+        self._cfg = cfg or {}
         self.max_messages = max_messages
         self._msg_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
         self._trigger_event = threading.Event()
@@ -144,6 +146,38 @@ class Overlay:
         self._hotkey_btn.pack(side="left", padx=2, pady=2)
         self._rebinding = False
 
+        self._logs_btn = tk.Button(
+            bar,
+            text="📜 Logs",
+            bg="#1a2a2a",
+            fg="#8fd8d8",
+            activebackground="#2a5a5a",
+            activeforeground="#aaffff",
+            font=("Consolas", 9, "bold"),
+            relief="flat",
+            padx=10,
+            cursor="hand2",
+            command=self._on_logs_click,
+        )
+        self._logs_btn.pack(side="left", padx=2, pady=2)
+        self._logs_window: tk.Toplevel | None = None
+
+        self._paste_btn = tk.Button(
+            bar,
+            text="📋 Paste",
+            bg="#2a1a2a",
+            fg="#d8a8d8",
+            activebackground="#5a2a5a",
+            activeforeground="#ffaaff",
+            font=("Consolas", 9, "bold"),
+            relief="flat",
+            padx=10,
+            cursor="hand2",
+            command=self._on_paste_click,
+        )
+        self._paste_btn.pack(side="left", padx=2, pady=2)
+        self._paste_window: tk.Toplevel | None = None
+
         self._status = tk.Label(
             bar,
             text="Press button or F7 to translate",
@@ -211,8 +245,12 @@ class Overlay:
             cursor="fleur",
             yscrollcommand=scrollbar.set,
         )
-        self.text.tag_configure("src", foreground="#8a8a8a")
         self.text.tag_configure("dst", foreground="#7bd88f")
+        # Channel colors — configured LAST so they always win over "src".
+        self.text.tag_configure("src", foreground="#8a8a8a")  # dim fallback
+        self.text.tag_configure("allies", foreground="#6bb8ff")      # blue
+        self.text.tag_configure("all", foreground="#e0e0e0")          # white
+        self.text.tag_configure("spectator", foreground="#aaaaaa")    # gray
         self.text.pack(side="left", fill="both", expand=True)
 
         scrollbar.config(command=self.text.yview)
@@ -222,6 +260,9 @@ class Overlay:
         self.text.bind("<ButtonPress-1>", self._on_drag_start)
         self.text.bind("<B1-Motion>", self._on_drag_move)
         self.text.bind("<ButtonRelease-1>", self._on_drag_end)
+
+        # --- Right-click context menu ---
+        self.text.bind("<Button-3>", self._on_text_rightclick)
 
         # --- Close / transparency ---
         # Only ESC closes the app (and only when the overlay has focus).
@@ -325,18 +366,36 @@ class Overlay:
 
         # Bind globally (on root) with a unique tag so we can unbind it.
         self._rebind_bind_id = self.root.bind("<Key>", capture)
+        # Override the global Escape binding (which closes the app) so
+        # that during rebind Escape only cancels the rebind.
+        self._rebind_esc_id = self.root.bind(
+            "<Escape>", lambda _e: (self._finish_rebind(None), "break")[1],
+            add=False,
+        )
 
     def _finish_rebind(self, new_vk: int | None) -> None:
         try:
             self.root.unbind("<Key>", self._rebind_bind_id)
         except Exception:
             pass
+        # Restore the original global Escape=close binding.
+        try:
+            self.root.unbind("<Escape>", self._rebind_esc_id)
+        except Exception:
+            pass
+        self.root.bind(
+            "<Escape>",
+            lambda _: (None if self._locked else self._close()),
+        )
         self._rebinding = False
         if new_vk is None:
             self._hotkey_btn.configure(
                 text=f"🎹 {self._hotkey_name}", bg="#2a2a1a"
             )
             self.set_status("Rebind cancelled", "#888")
+            # Re-assert the existing hotkey registration in case focus/Esc
+            # side-effects disturbed it, so F7 keeps working after cancel.
+            self._request_hotkey_reregister()
             return
         self._hotkey_vk = new_vk
         self._hotkey_name = _vk_to_name(new_vk)
@@ -540,6 +599,21 @@ class Overlay:
         except Exception:
             pass
 
+    # ---- right-click menu ----
+    def _on_text_rightclick(self, event: tk.Event) -> None:
+        menu = tk.Menu(self.root, bg="#1a1a1a", fg="#e0e0e0",
+                       activebackground="#2a2a2a", activeforeground="#e0e0e0",
+                       tearoff=False)
+        menu.add_command(label="Copy all", command=lambda: (
+            self.root.clipboard_clear(),
+            self.root.clipboard_append(self.text.get("1.0", "end")),
+            self.root.update(),
+        ))
+        menu.add_separator()
+        menu.add_command(label="Select all", command=lambda: self.text.tag_add("sel", "1.0", "end"))
+        menu.add_command(label="Clear", command=self.clear)
+        menu.post(event.x_root, event.y_root)
+
     # ---- alpha ----
     def _on_alpha_wheel(self, event: tk.Event) -> None:
         step = 0.05 if event.delta > 0 else -0.05
@@ -557,6 +631,120 @@ class Overlay:
             self.text.configure(state="normal")
             self.text.delete("1.0", "end")
             self.text.configure(state="disabled")
+        except Exception:
+            pass
+
+    # ---- logs window ----
+    def _on_logs_click(self) -> None:
+        # Focus existing window if already open.
+        if self._logs_window is not None and self._logs_window.winfo_exists():
+            try:
+                self._logs_window.lift()
+                self._logs_window.focus_force()
+                self._refresh_logs_text()
+                return
+            except Exception:
+                self._logs_window = None
+
+        from . import history
+
+        win = tk.Toplevel(self.root)
+        self._logs_window = win
+        win.title("Translation history")
+        win.configure(bg="#0a0a0a")
+        win.geometry("760x520")
+        win.attributes("-topmost", True)
+
+        bar = tk.Frame(win, bg="#151515", height=30)
+        bar.pack(fill="x"); bar.pack_propagate(False)
+
+        count_lbl = tk.Label(bar, text="", bg="#151515", fg="#888",
+                             font=("Consolas", 9))
+        count_lbl.pack(side="left", padx=8)
+
+        def do_refresh():
+            self._refresh_logs_text()
+
+        def do_delete():
+            from tkinter import messagebox
+            if not messagebox.askyesno(
+                "Delete history",
+                "Delete all saved translations?\nThis cannot be undone.",
+                parent=win,
+            ):
+                return
+            history.clear()
+            self._refresh_logs_text()
+
+        def do_open_folder():
+            try:
+                import os
+                os.startfile(str(history.file_path().parent))
+            except Exception:
+                pass
+
+        for txt, cmd, fg in (
+            ("🔄 Refresh",        do_refresh,     "#8fd8d8"),
+            ("📂 Open folder",    do_open_folder, "#8fa8d8"),
+            ("🗑 Delete history", do_delete,      "#ff6b6b"),
+        ):
+            tk.Button(
+                bar, text=txt, command=cmd,
+                bg="#1a1a1a", fg=fg, activebackground="#2a2a2a",
+                activeforeground=fg, font=("Consolas", 9, "bold"),
+                relief="flat", padx=8, cursor="hand2",
+            ).pack(side="right", padx=2, pady=3)
+
+        # Text area with scrollbar.
+        frame = tk.Frame(win, bg="#0a0a0a")
+        frame.pack(fill="both", expand=True)
+
+        sb = ttk.Scrollbar(frame, orient="vertical",
+                           style="Dark.Vertical.TScrollbar")
+        sb.pack(side="right", fill="y")
+
+        txt = tk.Text(
+            frame, bg="#0a0a0a", fg="#e0e0e0",
+            insertbackground="#e0e0e0", font=("Consolas", 10),
+            wrap="word", borderwidth=0, highlightthickness=0,
+            padx=10, pady=6, state="disabled",
+            yscrollcommand=sb.set,
+        )
+        txt.tag_configure("time", foreground="#555")
+        txt.tag_configure("src",  foreground="#8a8a8a")
+        txt.tag_configure("dst",  foreground="#7bd88f")
+        txt.pack(side="left", fill="both", expand=True)
+        sb.config(command=txt.yview)
+
+        self._logs_text = txt
+        self._logs_count = count_lbl
+
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.protocol("WM_DELETE_WINDOW", lambda: (
+            setattr(self, "_logs_window", None), win.destroy()
+        ))
+
+        self._refresh_logs_text()
+
+    def _refresh_logs_text(self) -> None:
+        from . import history
+        if self._logs_window is None or not self._logs_window.winfo_exists():
+            return
+        records = history.read_all()
+        txt = self._logs_text
+        try:
+            txt.configure(state="normal")
+            txt.delete("1.0", "end")
+            for r in records:
+                t   = r.get("t", "")
+                src = r.get("src", "")
+                dst = r.get("dst", "")
+                txt.insert("end", f"[{t}]\n", "time")
+                txt.insert("end", f"  {src}\n", "src")
+                txt.insert("end", f"  {dst}\n\n", "dst")
+            txt.configure(state="disabled")
+            txt.see("end")
+            self._logs_count.config(text=f"{len(records)} entries")
         except Exception:
             pass
 
@@ -582,10 +770,356 @@ class Overlay:
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
         for orig, trans in self._messages:
-            self.text.insert("end", f"{orig}\n", "src")
+            # Detect channel from [Tag] and apply color.
+            tag = "all"  # default
+            orig_lower = orig.lower()
+            if "[allies]" in orig_lower:
+                tag = "allies"
+            elif "[spectator]" in orig_lower or "[observer]" in orig_lower:
+                tag = "spectator"
+            # Use channel tag for color; "src" only as fallback for [All].
+            self.text.insert("end", f"{orig}\n", tag)
             self.text.insert("end", f"{trans}\n\n", "dst")
         self.text.see("end")
         self.text.configure(state="disabled")
+
+    # ---- paste & copy ----
+    @staticmethod
+    def _detect_lang(text: str):
+        """Return (src, tgt) based on Cyrillic ratio."""
+        cyr = sum(1 for c in text if "\u0400" <= c <= "\u04FF")
+        lat = sum(1 for c in text if c.isalpha() and not ("\u0400" <= c <= "\u04FF"))
+        is_ru = cyr >= 3 and (cyr + lat) > 0 and cyr / (cyr + lat) >= 0.4
+        return ("ru", "en") if is_ru else ("en", "ru")
+
+    def _on_paste_click(self) -> None:
+        if self._paste_window is not None and self._paste_window.winfo_exists():
+            try:
+                # Restore if minimized / withdrawn, then bring to front.
+                try:
+                    if self._paste_window.state() in ("iconic", "withdrawn"):
+                        self._paste_window.deiconify()
+                except Exception:
+                    pass
+                self._paste_window.deiconify()
+                self._paste_window.lift()
+                self._paste_window.attributes("-topmost", True)
+                self._paste_window.after(200, lambda: self._paste_window.attributes("-topmost", False))
+                self._paste_window.focus_force()
+                return
+            except Exception:
+                self._paste_window = None
+
+        win = tk.Toplevel(self.root)
+        self._paste_window = win
+        win.title("Paste & Translate")
+        win.configure(bg="#0a0a0a")
+        win.geometry("700x340")
+        win.resizable(True, True)
+        win.attributes("-topmost", True)
+
+        # ── Top: input label + language badge ──────────────────────────────
+        top_fr = tk.Frame(win, bg="#0a0a0a")
+        top_fr.pack(fill="x", padx=8, pady=(8, 2))
+        tk.Label(top_fr, text="Input text (Russian ↔ English):",
+                 bg="#0a0a0a", fg="#e0e0e0", font=("Consolas", 9)
+                 ).pack(side="left")
+        lang_badge = tk.Label(top_fr, text="", bg="#0a0a0a",
+                              fg="#f2c94c", font=("Consolas", 9, "bold"))
+        lang_badge.pack(side="right", padx=4)
+
+        # ── Input text (fixed height 5 rows) ───────────────────────────────
+        txt = tk.Text(win, bg="#111420", fg="#e0e0e0",
+                      insertbackground="#e0e0e0", font=("Consolas", 10),
+                      wrap="word", borderwidth=0, highlightthickness=1,
+                      highlightbackground="#2a2a3a",
+                      padx=6, pady=4, height=5)
+        txt.pack(fill="x", padx=8, pady=(0, 4))
+        txt.focus_set()
+
+        # Pre-fill from clipboard.
+        try:
+            txt.insert("1.0", self.root.clipboard_get())
+        except Exception:
+            pass
+
+        # ── Buttons ────────────────────────────────────────────────────────
+        btn_fr = tk.Frame(win, bg="#151515")
+        btn_fr.pack(fill="x", padx=8, pady=4)
+
+        result_txt = tk.Text(win, bg="#111420", fg="#7bd88f",
+                             insertbackground="#7bd88f", font=("Consolas", 10),
+                             wrap="word", borderwidth=0, highlightthickness=1,
+                             highlightbackground="#2a2a3a",
+                             padx=6, pady=4, state="disabled", height=5)
+
+        def _update_badge(*_):
+            text = txt.get("1.0", "end").strip()
+            if not text:
+                lang_badge.config(text="")
+                return
+            src, tgt = self._detect_lang(text)
+            arrow = "🇷🇺 → 🇬🇧" if src == "ru" else "🇬🇧 → 🇷🇺"
+            lang_badge.config(text=arrow)
+
+        # Live-translate debounce state
+        self._live_after_id = None
+
+        def _schedule_live(_evt=None):
+            _update_badge()
+            if self._live_after_id is not None:
+                try: win.after_cancel(self._live_after_id)
+                except Exception: pass
+            self._live_after_id = win.after(450, lambda: do_translate(live=True))
+
+        txt.bind("<KeyRelease>", _schedule_live)
+        _update_badge()
+
+        def do_translate(live: bool = False):
+            text = txt.get("1.0", "end").strip()
+            if not text:
+                result_txt.configure(state="normal")
+                result_txt.delete("1.0", "end")
+                result_txt.configure(state="disabled")
+                return
+            from dota_ocr.translator import Translator
+            src, tgt = self._detect_lang(text)
+            _update_badge()
+            def _worker(snapshot=text, src=src, tgt=tgt):
+                try:
+                    result = Translator().translate(snapshot, src=src, target_language=tgt)
+                except Exception:
+                    return
+                if not result: return
+                def _apply():
+                    # Only apply if input hasn't changed (avoids flicker during live typing)
+                    if live and txt.get("1.0", "end").strip() != snapshot:
+                        return
+                    result_txt.configure(state="normal")
+                    result_txt.delete("1.0", "end")
+                    result_txt.insert("1.0", result)
+                    result_txt.configure(state="disabled")
+                try: win.after(0, _apply)
+                except Exception: pass
+            threading.Thread(target=_worker, daemon=True).start()
+
+        def do_fix_grammar():
+            """Round-trip through the opposite language to clean up grammar."""
+            text = txt.get("1.0", "end").strip()
+            if not text:
+                return
+            from dota_ocr.translator import Translator
+            src, tgt = self._detect_lang(text)
+            status_lbl.config(text="Fixing grammar...", fg="#d8c88f")
+            def _worker():
+                try:
+                    t = Translator()
+                    pivot = t.translate(text, src=src, target_language=tgt)
+                    fixed = t.translate(pivot, src=tgt, target_language=src) if pivot else None
+                except Exception:
+                    fixed = None
+                def _apply():
+                    if fixed:
+                        txt.delete("1.0", "end")
+                        txt.insert("1.0", fixed)
+                        status_lbl.config(text="Grammar fixed ✓", fg="#7bd88f")
+                        win.after(1500, lambda: status_lbl.config(text=""))
+                        do_translate()
+                    else:
+                        status_lbl.config(text="Grammar fix failed", fg="#ff6b6b")
+                try: win.after(0, _apply)
+                except Exception: pass
+            threading.Thread(target=_worker, daemon=True).start()
+
+        def do_copy_result():
+            text = result_txt.get("1.0", "end").strip()
+            if text:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(text)
+                self.root.update()
+                status_lbl.config(text="Copied!", fg="#7bd88f")
+                win.after(1500, lambda: status_lbl.config(text=""))
+
+        def _ensure_translated():
+            """If Result is empty, translate the input first. Returns the
+            text to send, or '' if nothing to work with."""
+            result = result_txt.get("1.0", "end").strip()
+            if result:
+                return result
+            # Auto-translate before sending.
+            do_translate()
+            return result_txt.get("1.0", "end").strip()
+
+        def do_send_team():
+            text = _ensure_translated()
+            if not text:
+                status_lbl.config(text="Type something first", fg="#ff6b6b")
+                return
+            self._paste_to_dota_chat(text, all_chat=False)
+
+        def do_send_all():
+            text = _ensure_translated()
+            if not text:
+                status_lbl.config(text="Type something first", fg="#ff6b6b")
+                return
+            self._paste_to_dota_chat(text, all_chat=True)
+
+        for label, cmd, bg, fg in (
+            ("🔄 Translate",   do_translate, "#1a3a1a", "#7bd88f"),
+            ("✨ Fix grammar", do_fix_grammar, "#3a2a1a", "#d8c88f"),
+            ("📋 Copy result", do_copy_result, "#1a2a3a", "#8fa8d8"),
+            ("👥 Team chat",   do_send_team, "#1a1a3a", "#8fa8ff"),
+            ("🌐 All chat",    do_send_all,  "#2a1a1a", "#d88f8f"),
+        ):
+            tk.Button(btn_fr, text=label, command=cmd,
+                      bg=bg, fg=fg, activebackground="#2a2a2a",
+                      activeforeground=fg, font=("Consolas", 9, "bold"),
+                      relief="flat", padx=8, cursor="hand2",
+                      ).pack(side="left", padx=2, pady=3)
+
+        # Status label on its OWN row below buttons so it's never clipped.
+        status_lbl = tk.Label(win, text="", bg="#0a0a0a",
+                              fg="#888", font=("Consolas", 9),
+                              anchor="w")
+        status_lbl.pack(fill="x", padx=10, pady=(0, 2))
+
+        # ── Result label + text ────────────────────────────────────────────
+        tk.Label(win, text="Result:", bg="#0a0a0a", fg="#e0e0e0",
+                 font=("Consolas", 9)).pack(anchor="w", padx=10, pady=(4, 2))
+
+        result_txt.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        # Enter in input triggers translate; Ctrl+Enter sends to Dota.
+        txt.bind("<Return>",         lambda e: (do_translate(), "break"))
+        txt.bind("<Control-Return>", lambda e: (do_translate(), win.after(300, do_send_team), "break"))
+        txt.bind("<Shift-Return>",   lambda e: (do_translate(), win.after(300, do_send_all),  "break"))
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.protocol("WM_DELETE_WINDOW", lambda: (
+            setattr(self, "_paste_window", None), win.destroy()
+        ))
+
+    # Map readable key names -> Virtual Key codes.
+    _CHAT_KEY_VK = {
+        "Return": 0x0D, "Enter": 0x0D,
+        "y": 0x59, "Y": 0x59,
+        "t": 0x54, "T": 0x54,
+        "u": 0x55, "U": 0x55,
+    }
+
+    def _paste_to_dota_chat(self, text: str, all_chat: bool = False) -> None:
+        """Focus Dota, open chat, paste translated text, send.
+
+        all_chat=False → Enter        (team chat, Dota default)
+        all_chat=True  → Shift+Enter  (all chat)
+        """
+        import time, threading
+
+        VK_MENU   = 0x12   # Alt
+        VK_SHIFT  = 0x10
+        VK_CTRL   = 0x11
+        VK_V      = 0x56
+        VK_RETURN = 0x0D
+
+        def _kd(vk):
+            ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+
+        def _ku(vk):
+            ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
+
+        def _run():
+            try:
+                from ctypes import wintypes, c_size_t, c_void_p, c_wchar_p
+                from dota_ocr.window import find_dota_hwnd
+                hwnd = find_dota_hwnd()
+                if not hwnd:
+                    self.root.after(0, lambda: self.set_status("Dota 2 not found", "#ff4444"))
+                    return
+
+                u32 = ctypes.windll.user32
+                k32 = ctypes.windll.kernel32
+
+                # Declare proper argtypes/restypes so 64-bit handles don't
+                # get truncated to 32-bit ints (root cause of the previous
+                # 'access violation writing 0x0' crash).
+                k32.GlobalAlloc.argtypes   = [wintypes.UINT, c_size_t]
+                k32.GlobalAlloc.restype    = wintypes.HGLOBAL
+                k32.GlobalLock.argtypes    = [wintypes.HGLOBAL]
+                k32.GlobalLock.restype     = wintypes.LPVOID
+                k32.GlobalUnlock.argtypes  = [wintypes.HGLOBAL]
+                k32.GlobalUnlock.restype   = wintypes.BOOL
+                u32.OpenClipboard.argtypes = [wintypes.HWND]
+                u32.OpenClipboard.restype  = wintypes.BOOL
+                u32.EmptyClipboard.restype = wintypes.BOOL
+                u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+                u32.SetClipboardData.restype  = wintypes.HANDLE
+                u32.CloseClipboard.restype    = wintypes.BOOL
+
+                # ── 1) clipboard via raw Win32 (before any focus shuffle) ─────
+                CF_UNICODETEXT = 13
+                GMEM_MOVEABLE  = 0x0002
+                encoded = text.encode("utf-16-le") + b"\x00\x00"  # null-terminated
+                hMem = k32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+                if not hMem:
+                    raise RuntimeError("GlobalAlloc failed")
+                pMem = k32.GlobalLock(hMem)
+                if not pMem:
+                    raise RuntimeError("GlobalLock failed")
+                ctypes.memmove(pMem, encoded, len(encoded))
+                k32.GlobalUnlock(hMem)
+                if not u32.OpenClipboard(0):
+                    raise RuntimeError("OpenClipboard failed")
+                try:
+                    u32.EmptyClipboard()
+                    u32.SetClipboardData(CF_UNICODETEXT, hMem)
+                finally:
+                    u32.CloseClipboard()
+                print(f"[send] clipboard set ({len(text)} chars)", flush=True)
+
+                # ── 2) grant foreground privilege via fake Alt tap ────────────
+                # Windows blocks SetForegroundWindow from background procs.
+                # Sending ANY keybd_event attaches our thread to the input
+                # queue for one tick, which bypasses that restriction.
+                _kd(VK_MENU); _ku(VK_MENU)
+                time.sleep(0.02)
+
+                # ── 3) focus Dota (must be windowed/borderless, NOT exclusive fullscreen) ─
+                fg_ok = u32.SetForegroundWindow(hwnd)
+                u32.BringWindowToTop(hwnd)
+                u32.SetFocus(hwnd)
+                time.sleep(0.45)
+                cur_fg = u32.GetForegroundWindow()
+                print(f"[send] SetForegroundWindow={fg_ok}, fg_hwnd={cur_fg}, dota={hwnd}", flush=True)
+                if cur_fg != hwnd:
+                    self.root.after(0, lambda: self.set_status(
+                        "Focus failed — use borderless window", "#ff4444"))
+                    return
+
+                # ── 4) open chat ──────────────────────────────────────────────
+                # Team:  Enter    |   All: Shift+Enter
+                if all_chat:
+                    _kd(VK_SHIFT)
+                _kd(VK_RETURN); time.sleep(0.05); _ku(VK_RETURN)
+                if all_chat:
+                    _ku(VK_SHIFT)
+                time.sleep(0.45)
+
+                # ── 5) Ctrl+V ─────────────────────────────────────────────────
+                _kd(VK_CTRL); _kd(VK_V); time.sleep(0.05)
+                _ku(VK_V);    _ku(VK_CTRL)
+                time.sleep(0.25)
+
+                # ── 6) Enter to send ──────────────────────────────────────────
+                _kd(VK_RETURN); time.sleep(0.05); _ku(VK_RETURN)
+
+                label = "All chat" if all_chat else "Team chat"
+                self.root.after(0, lambda: self.set_status(f"Sent to {label} ✓", "#7bd88f"))
+                print(f"[send] done ({label})", flush=True)
+
+            except Exception as e:
+                print(f"[send] ERROR: {e}", flush=True)
+                self.root.after(0, lambda err=e: self.set_status(f"Send failed: {err}", "#ff4444"))
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def mainloop(self) -> None:
         self.root.mainloop()

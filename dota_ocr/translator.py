@@ -19,14 +19,15 @@ class Translator:
         self.target = target
         self._cache: Dict[Tuple[str, str], str] = {}
 
-    def translate(self, text: str, src: str = "auto") -> str:
+    def translate(self, text: str, src: str = "auto", target_language: str = "") -> str:
         if not text or len(text.strip()) < 2:
             return text
-        key = (text, src)
+        target = target_language if target_language else self.target
+        key = (text, src, target)
         if key in self._cache:
             return self._cache[key]
         try:
-            out = GoogleTranslator(source=src, target=self.target).translate(text)
+            out = GoogleTranslator(source=src, target=target).translate(text)
         except Exception:
             out = None
         result = out if out else text

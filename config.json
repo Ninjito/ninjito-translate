@@ -12,13 +12,15 @@
   "debug": true,
   "require_dota_foreground": false,
   "capture_mode": "printwindow",
+  "dota_chat_key": "Return",
   "overlay": {
-    "x": 50,
-    "y": 50,
-    "width": 640,
+    "x": 600,
+    "y": 790,
+    "width":700,
     "height": 90,
     "font_size": 11,
     "alpha": 0.55,
-    "max_messages": 5
+    "max_messages": 5,
+    "hotkey_vk": 118
   }
 }

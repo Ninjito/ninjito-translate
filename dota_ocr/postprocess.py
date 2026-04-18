@@ -169,16 +169,38 @@ _DEFINITE_CYRILLIC = set(
 
 
 def has_cyrillic(text: str) -> bool:
-    """Return True if the text has Russian content.
+    """Return True if the text is actually Russian (not English with
+    a stray Cyrillic OCR homoglyph).
 
-    Lenient: at least 2 Cyrillic characters anywhere in the text.
-    Dota OCR garbles chars heavily (prefixes like 'lat' / 'slаt' are
-    mangled '[All]'), so strict body-only / percentage checks drop
-    real Russian chat.  We rely on the capture region being limited
-    to the chat panel to filter out non-chat content.
+    We look ONLY at the message body (after the first ':') when one is
+    present, because the prefix `[Allies] Nickname` is almost always
+    Latin and would dilute the ratio.
+
+    Rules (all must hold):
+      * at least 3 Cyrillic chars in the body
+      * Cyrillic letters >= 40% of all letters in the body
+
+    This rejects lines like:
+        "Name : i love you okay"              (0 cyr -> False)
+        "Name : hello Вasd"                   (1 cyr, 95% latin -> False)
+    but accepts:
+        "Name : спасибо за помощь"            (100% cyr -> True)
+        "Name : slаt ебаный"                  (5 cyr, 50% cyr -> True)
     """
-    count = sum(1 for c in text if "\u0400" <= c <= "\u04FF")
-    return count >= 2
+    body = _get_body(text)
+    cyr = 0
+    lat = 0
+    for c in body:
+        if "\u0400" <= c <= "\u04FF":
+            cyr += 1
+        elif c.isalpha():
+            lat += 1
+    if cyr < 3:
+        return False
+    total = cyr + lat
+    if total == 0:
+        return False
+    return (cyr / total) >= 0.4
 
 
 def normalize_cyrillic(text: str) -> str:

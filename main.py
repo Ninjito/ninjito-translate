@@ -13,6 +13,31 @@ Only Russian text after the player name ':' is translated.
 
 from __future__ import annotations
 
+# --- Suppress flashing console windows from subprocess calls (tesseract). ---
+# pytesseract spawns tesseract.exe without CREATE_NO_WINDOW, which pops up
+# a black cmd window every OCR call when the app is built with --noconsole.
+# We patch subprocess.Popen here (before pytesseract imports it) so every
+# child process inherits the hidden-window flags.
+import subprocess as _sp
+import sys as _sys
+if _sys.platform == "win32":
+    _CREATE_NO_WINDOW = 0x08000000
+    _STARTF_USESHOWWINDOW = 0x00000001
+    _SW_HIDE = 0
+    _orig_popen_init = _sp.Popen.__init__
+
+    def _silent_popen_init(self, *args, **kwargs):
+        if kwargs.get("creationflags", 0) == 0:
+            kwargs["creationflags"] = _CREATE_NO_WINDOW
+        if kwargs.get("startupinfo") is None:
+            si = _sp.STARTUPINFO()
+            si.dwFlags |= _STARTF_USESHOWWINDOW
+            si.wShowWindow = _SW_HIDE
+            kwargs["startupinfo"] = si
+        return _orig_popen_init(self, *args, **kwargs)
+
+    _sp.Popen.__init__ = _silent_popen_init
+
 import hashlib
 import json
 import sys
@@ -30,6 +55,7 @@ from dota_ocr.ocr import OCRReader
 from dota_ocr.overlay import Overlay
 from dota_ocr.postprocess import has_cyrillic, is_chat_line, normalize_colons
 from dota_ocr.translator import Translator
+from dota_ocr import history, glossary
 
 def _app_dir() -> Path:
     """Return the folder where config.json lives.
@@ -105,14 +131,32 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
 
     translator = Translator(target=cfg.get("target_language", "en"))
     dedup = MessageDeduplicator()
+    gloss = glossary.load()
+    if gloss:
+        print(f"[init] Loaded {len(gloss)} glossary entries.", flush=True)
 
     print(f"[run] watching {region_descr}. Press Translate or F7.", flush=True)
 
+    # Auto-retry state: if a trigger produces 0 translations, we immediately
+    # re-run capture+OCR (without waiting for another F7 press) up to
+    # MAX_ATTEMPTS-1 more times.  OCR can miss text on a single frame.
+    MAX_ATTEMPTS = 3
+    attempt_num = 0  # 0 = idle; 1..MAX_ATTEMPTS = in a retry burst
     while not stop_event.is_set() and not overlay.is_closing():
       try:
-        # Wait for button click or F7 hotkey.
-        if not overlay.wait_for_trigger(timeout=0.3):
-            continue
+        # Wait for button click or F7 hotkey — unless we're mid-retry.
+        if attempt_num == 0:
+            if not overlay.wait_for_trigger(timeout=0.3):
+                continue
+            attempt_num = 1
+        else:
+            attempt_num += 1
+            if attempt_num > MAX_ATTEMPTS:
+                attempt_num = 0
+                continue
+            time.sleep(0.15)
+            if debug:
+                print(f"[retry] attempt {attempt_num}/{MAX_ATTEMPTS}", flush=True)
 
         # --- Capture ---
         try:
@@ -218,11 +262,38 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
             # Normalize colon lookalikes first.
             text = normalize_colons(text)
 
+            # Must look like a real chat line: "[Tag] Name : message".
+            # This rejects HUD garbage (hero stats, ability tooltips,
+            # scoreboard columns) that happens to contain Cyrillic.
+            if not is_chat_line(text):
+                if debug:
+                    print(f"[skip-notchat] {text!r}", flush=True)
+                continue
+
             # Only translate if it has Russian (Cyrillic) characters.
             if not has_cyrillic(text):
                 if debug:
                     print(f"[skip-en] {text!r}", flush=True)
                 continue
+
+            # Extra junk guard: a "word" is a run of letters.  Real chat
+            # messages have most of their words at length >=2 and mostly
+            # lowercase.  OCR garbage tends to be 1-char tokens with
+            # random caps like "CABP moa> LEI ise".
+            import re as _re
+            body_only = text.split(":", 1)[1] if ":" in text else text
+            words = _re.findall(r"[^\s]+", body_only)
+            if len(words) >= 3:
+                short = sum(1 for w in words if len(w) == 1)
+                mixed_case = sum(
+                    1 for w in words
+                    if len(w) >= 2 and any(c.isupper() for c in w[1:])
+                )
+                # >40% single-char tokens OR >40% mid-word-caps ⇒ junk.
+                if short / len(words) > 0.4 or mixed_case / len(words) > 0.4:
+                    if debug:
+                        print(f"[skip-junk] {text!r}", flush=True)
+                    continue
 
             # Skip obvious system messages (no player typed these).
             lower = text.lower()
@@ -242,15 +313,42 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
             to_translate = body if body.strip() else text
 
             try:
-                # Force source=Russian so English text (if any slips
-                # through) won't be auto-detected and round-tripped.
-                translated = translator.translate(to_translate, src="ru")
+                # Apply custom glossary replacements.
+                to_translate_with_gloss = glossary.apply(to_translate, gloss)
+
+                # Detect language: Russian or English?
+                # Heuristic: count Cyrillic chars in the original (before glossary).
+                cyr_count = sum(1 for c in to_translate if "\u0400" <= c <= "\u04FF")
+                lat_count = sum(1 for c in to_translate if c.isalpha() and not ("\u0400" <= c <= "\u04FF"))
+                is_russian = cyr_count >= 3 and lat_count + cyr_count > 0 and (cyr_count / (lat_count + cyr_count)) >= 0.4
+                src = "ru" if is_russian else "en"
+                tgt = "en" if is_russian else "ru"
+
+                translated = translator.translate(to_translate_with_gloss, src=src, target_language=tgt)
                 if not translated:
                     continue
+
+                # Hard guard: the result must be meaningfully different
+                # from the input AND must contain no Cyrillic.  Google
+                # sometimes echoes the input back when it can't handle
+                # OCR-garbled text — we skip those instead of showing
+                # English-to-English or Russian-to-Russian noise.
+                src_norm = to_translate.strip().lower()
+                dst_norm = translated.strip().lower()
+                if dst_norm == src_norm:
+                    if debug:
+                        print(f"[skip-echo] {to_translate!r}", flush=True)
+                    continue
+                if any("\u0400" <= c <= "\u04FF" for c in translated):
+                    if debug:
+                        print(f"[skip-ru-out] {translated!r}", flush=True)
+                    continue
+
                 display_src = f"{prefix} {body}" if (prefix and body) else text
                 display_dst = f"{prefix} {translated}" if (prefix and body) else translated
                 print(f"{to_translate!r}  ->  {translated!r}", flush=True)
                 overlay.push(display_src, display_dst)
+                history.append(display_src, display_dst)
                 translated_count += 1
             except Exception as e:
                 if debug:
@@ -258,8 +356,14 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
 
         if translated_count > 0:
             overlay.set_status(f"Translated {translated_count} line(s)", "#7bd88f")
+            attempt_num = 0  # end retry burst on success
         else:
-            overlay.set_status("No Russian text found", "#888")
+            if attempt_num < MAX_ATTEMPTS:
+                # Leave attempt_num > 0 so next iteration retries immediately.
+                overlay.set_status(f"Reading... ({attempt_num}/{MAX_ATTEMPTS})", "#ffa500")
+            else:
+                overlay.set_status("No Russian text found", "#888")
+                attempt_num = 0
       except Exception:
         # Any unhandled error in this iteration: log it, show status,
         # sleep briefly, then keep the loop alive. This way the app
@@ -331,6 +435,7 @@ def main() -> None:
     overlay_kwargs = dict(cfg.get("overlay", {}))
     overlay_kwargs["on_recalibrate"] = on_recalibrate
     overlay_kwargs["on_hotkey_changed"] = on_hotkey_changed
+    overlay_kwargs["cfg"] = cfg
     overlay = Overlay(**overlay_kwargs)
     stop_event = threading.Event()
     t = threading.Thread(
