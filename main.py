@@ -94,7 +94,7 @@ from dota_ocr.dedup import MessageDeduplicator
 from dota_ocr.dpi import enable_dpi_awareness
 from dota_ocr.ocr import OCRReader
 from dota_ocr.overlay import Overlay
-from dota_ocr.postprocess import has_cyrillic, is_chat_line, normalize_colons
+from dota_ocr.postprocess import has_cyrillic, is_chat_line, normalize_colons, normalize_cyrillic
 from dota_ocr.translator import Translator
 from dota_ocr import history, glossary
 
@@ -299,6 +299,12 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
         # Clear previous batch so only current F7 press results show.
         overlay.clear()
 
+        # Keep only the LAST 5 chat lines OCR produced. Older ones are
+        # either already shown from a prior F7 press or off-screen in
+        # Dota. This makes the overlay consistent (always the newest
+        # chat) and saves translation API calls on stale lines.
+        merged = merged[-5:]
+
         for text, conf in merged:
             # Normalize colon lookalikes first.
             text = normalize_colons(text)
@@ -349,6 +355,11 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
                 continue
 
             # Extract the message body: everything after the first ':'.
+            # Fix Latin-for-Cyrillic homoglyph OCR errors in the body
+            # (m3 -> из, Еrипtа -> Египта, etc). Only touches the body
+            # after the first ':', so usernames stay intact.
+            text = normalize_cyrillic(text)
+
             # If no ':', translate the whole line (plain body fragment).
             prefix, body = split_chat_line(text)
             to_translate = body if body.strip() else text

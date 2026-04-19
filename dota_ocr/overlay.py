@@ -18,6 +18,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
 
+from dota_ocr import sizes as _sz
+
 
 def _resource_path(name: str) -> str:
     """Locate a bundled resource both in dev and under PyInstaller.
@@ -151,6 +153,62 @@ def _vk_to_name(vk: int) -> str:
     return f"VK_{vk:02X}"
 
 
+def _attach_tooltip(widget, text, delay_ms: int = 400) -> None:
+    """Lightweight hover-tooltip. `text` may be a str or a zero-arg
+    callable — when callable, it is evaluated at show-time so the
+    tooltip can reflect live state (e.g. the current hotkey binding)."""
+    state = {"after": None, "tip": None}
+
+    def _show():
+        state["after"] = None
+        try:
+            msg = text() if callable(text) else text
+            x = widget.winfo_rootx() + widget.winfo_width() // 2
+            y = widget.winfo_rooty() + widget.winfo_height() + 4
+            tip = tk.Toplevel(widget)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{x}+{y}")
+            try:
+                tip.attributes("-topmost", True)
+            except Exception:
+                pass
+            tk.Label(
+                tip, text=msg,
+                bg="#1f1f1f", fg="#e0e0e0",
+                font=("Consolas", 8),
+                padx=6, pady=2,
+                borderwidth=1, relief="solid",
+            ).pack()
+            state["tip"] = tip
+        except Exception:
+            state["tip"] = None
+
+    def _enter(_e=None):
+        _hide()
+        try:
+            state["after"] = widget.after(delay_ms, _show)
+        except Exception:
+            pass
+
+    def _hide(_e=None):
+        if state["after"] is not None:
+            try:
+                widget.after_cancel(state["after"])
+            except Exception:
+                pass
+            state["after"] = None
+        if state["tip"] is not None:
+            try:
+                state["tip"].destroy()
+            except Exception:
+                pass
+            state["tip"] = None
+
+    widget.bind("<Enter>", _enter, add="+")
+    widget.bind("<Leave>", _hide, add="+")
+    widget.bind("<ButtonPress>", _hide, add="+")
+
+
 # Reverse map: Tkinter keysym -> VK code for capturing a key rebind.
 _KEYSYM_TO_VK = {
     **{f"F{i}": 0x6F + i for i in range(1, 13)},
@@ -163,10 +221,10 @@ _KEYSYM_TO_VK = {
 class Overlay:
     def __init__(
         self,
-        x: int = 50,
-        y: int = 50,
-        width: int = 640,
-        height: int = 400,  # Taller to fit more messages
+        x: int = _sz.MAIN_X,
+        y: int = _sz.MAIN_Y,
+        width: int = _sz.MAIN_WIDTH,
+        height: int = _sz.MAIN_HEIGHT,  # initial; grows to fit messages
         alpha: float = 0.55,
         font_size: int = 11,
         max_messages: int = 50,  # Show many messages, user can scroll
@@ -221,7 +279,7 @@ class Overlay:
 
         self._btn = tk.Button(
             bar,
-            text="📷 Translate",
+            text=f"📷 Translate ({self._hotkey_name})",
             bg="#1a3a1a",
             fg="#7bd88f",
             activebackground="#2a5a2a",
@@ -233,80 +291,78 @@ class Overlay:
             command=self._on_translate_click,
         )
         self._btn.pack(side="left", padx=4, pady=2)
+        _attach_tooltip(self._btn,
+                        lambda: f"Translate — capture & translate chat now ({self._hk_name('translate')})")
 
         self._resize_btn = tk.Button(
             bar,
-            text="📐 Resize",
+            text="📐",
             bg="#1a1a3a",
             fg="#8fa8d8",
             activebackground="#2a2a5a",
             activeforeground="#aaccff",
-            font=("Consolas", 9, "bold"),
+            font=("Consolas", 10, "bold"),
             relief="flat",
-            padx=10,
+            padx=6,
             cursor="hand2",
             command=self._on_resize_click,
         )
         self._resize_btn.pack(side="left", padx=2, pady=2)
+        _attach_tooltip(self._resize_btn,
+                        lambda: "Resize — draw a new chat capture region")
 
         self._lock_btn = tk.Button(
             bar,
-            text="🔓 Unlocked",
+            text="🔓",
             bg="#2a1a1a",
             fg="#d88f8f",
             activebackground="#5a2a2a",
             activeforeground="#ffaaaa",
-            font=("Consolas", 9, "bold"),
+            font=("Consolas", 10, "bold"),
             relief="flat",
-            padx=10,
+            padx=6,
             cursor="hand2",
             command=self._on_lock_toggle,
         )
         self._lock_btn.pack(side="left", padx=2, pady=2)
         self._locked = False
+        _attach_tooltip(self._lock_btn,
+                        lambda: f"Lock — make overlay click-through ({self._hk_name('lock')})")
 
-        self._hotkey_btn = tk.Button(
-            bar,
-            text=f"🎹 {self._hotkey_name}",
-            bg="#2a2a1a",
-            fg="#d8d88f",
-            activebackground="#5a5a2a",
-            activeforeground="#ffffaa",
-            font=("Consolas", 9, "bold"),
-            relief="flat",
-            padx=10,
-            cursor="hand2",
-            command=self._on_hotkey_rebind,
-        )
-        self._hotkey_btn.pack(side="left", padx=2, pady=2)
+        # Hotkey rebind UI moved to Settings window.  Keep an invisible
+        # placeholder so legacy code that references self._hotkey_btn
+        # (e.g. _on_hotkey_rebind, _finish_rebind) doesn't explode.
+        self._hotkey_btn = tk.Button(bar, text="", borderwidth=0)
         self._rebinding = False
 
         self._logs_btn = tk.Button(
             bar,
-            text="📜 Logs",
+            text="📜",
             bg="#1a2a2a",
             fg="#8fd8d8",
             activebackground="#2a5a5a",
             activeforeground="#aaffff",
-            font=("Consolas", 9, "bold"),
+            font=("Consolas", 10, "bold"),
             relief="flat",
-            padx=10,
+            padx=6,
             cursor="hand2",
             command=self._on_logs_click,
         )
         self._logs_btn.pack(side="left", padx=2, pady=2)
         self._logs_window: tk.Toplevel | None = None
+        _attach_tooltip(self._logs_btn,
+                        lambda: f"Logs — translation history ({self._hk_name('logs')})")
 
         self._paste_btn = tk.Button(
             bar,
-            text="📋 Paste",
+            text="📋",
             bg="#2a1a2a",
             fg="#d8a8d8",
             activebackground="#5a2a5a",
             activeforeground="#ffaaff",
-            font=("Consolas", 9, "bold"),
+            font=("Consolas", 10, "bold"),
             relief="flat",
-            padx=10,
+            padx=6,
             cursor="hand2",
             command=self._on_paste_click,
         )
@@ -315,35 +371,78 @@ class Overlay:
         self._paste_input = None
         self._paste_send_team = None
         self._paste_send_all = None
+        self._paste_stop_btn = None
+        _attach_tooltip(self._paste_btn,
+                        lambda: f"Paste — type & translate to Russian ({self._hk_name('paste')})")
 
         self._settings_btn = tk.Button(
             bar,
-            text="⚙️ Settings",
+            text="⚙️",
             bg="#2a2a2a",
             fg="#cccccc",
             activebackground="#3a3a3a",
             activeforeground="#ffffff",
-            font=("Consolas", 9, "bold"),
+            font=("Consolas", 10, "bold"),
             relief="flat",
-            padx=10,
+            padx=6,
             cursor="hand2",
             command=self._on_settings_click,
         )
         self._settings_btn.pack(side="left", padx=2, pady=2)
         self._settings_window: tk.Toplevel | None = None
+        _attach_tooltip(self._settings_btn,
+                        lambda: f"Settings — hotkeys, capture, theme ({self._hk_name('settings')})")
 
+        # --- Spam / burst-send state (lives on self so it survives the
+        # Paste window closing).  The main-bar Stop button is hidden until
+        # a burst is running, then shows "⏹ Stop (N)" with the live count.
+        self._spam = {
+            "active": False, "after": None, "remaining": 0,
+            "count_var": None,  # IntVar from paste window (if open)
+            "status_lbl": None, # status label in paste window (if open)
+            "win": None,        # paste win ref (if open)
+        }
+        self._spam_stop_btn = tk.Button(
+            bar, text="⏹ Stop",
+            bg="#3a1a1a", fg="#ff8888",
+            activebackground="#5a2a2a", activeforeground="#ffaaaa",
+            font=("Consolas", 9, "bold"),
+            relief="flat", padx=8, cursor="hand2",
+            command=self._spam_stop,
+        )
+        # not packed yet — shown only while a burst is active
+        _attach_tooltip(self._spam_stop_btn,
+                        lambda: f"Stop the in-progress chat-spam burst ({self._hk_name('spam_stop')})")
+
+        # Close (X) button — pinned to the far right of the button bar.
+        # Disabled while the app is locked so click-through users can't
+        # accidentally kill the overlay.
+        self._close_btn = tk.Button(
+            bar,
+            text="✕",
+            bg="#2a1010", fg="#ff8888",
+            activebackground="#5a1010", activeforeground="#ff6666",
+            font=("Consolas", 10, "bold"),
+            relief="flat", padx=8, cursor="hand2",
+            command=self._close,
+        )
+        self._close_btn.pack(side="right", padx=(2, 4), pady=2)
+        _attach_tooltip(self._close_btn, "Close the app")
+
+        # --- Status label (inline, to the right of the buttons) ---
         self._status = tk.Label(
             bar,
             text=f"Press button or {self._hotkey_name} to translate",
-            bg="#151515",
-            fg="#555",
+            bg="#151515", fg="#888",
             font=("Consolas", 8),
+            anchor="w",
         )
-        self._status.pack(side="left", padx=6)
+        self._status.pack(side="left", fill="x", expand=True, padx=8)
 
         # --- Text display with scrollbar ---
         text_frame = tk.Frame(self.root, bg="#0a0a0a")
         text_frame.pack(fill="both", expand=True)
+        self._text_frame = text_frame
 
         # Use ttk + clam theme so the scrollbar actually respects custom
         # colors (native Win theme ignores them on plain tk.Scrollbar).
@@ -384,12 +483,15 @@ class Overlay:
         )
         scrollbar.pack(side="right", fill="y")
 
+        self._font_size = font_size
         self.text = tk.Text(
             text_frame,
             bg="#0a0a0a",
             fg="#e0e0e0",
             insertbackground="#e0e0e0",
             font=("Consolas", font_size),
+            # stored for theme code (transparent mode needs bold override)
+            # – see _apply_theme
             wrap="word",
             borderwidth=0,
             highlightthickness=0,
@@ -421,10 +523,7 @@ class Overlay:
         # --- Close / transparency ---
         # Only ESC closes the app (and only when the overlay has focus).
         # Right-click does NOT close anymore.
-        self.root.bind(
-            "<Escape>",
-            lambda _: (None if self._locked else self._close()),
-        )
+        # Escape no longer closes the app — only the ✕ button does.
         self.text.bind("<Shift-MouseWheel>", self._on_alpha_wheel)
         self.root.bind("<Shift-MouseWheel>", self._on_alpha_wheel)
 
@@ -437,6 +536,20 @@ class Overlay:
         # restore when Dota regains focus.  This runs on the Tk thread.
         self._auto_hidden = False
         self.root.after(400, self._tick_foreground_visibility)
+
+        # Auto-OCR / auto-translate-on-chat / theme init from config.
+        self._auto_ocr_after = None
+        self._chat_watch_after = None
+        self._chat_key_was_down = False
+        try:
+            self._apply_theme(str((self._cfg or {}).get("theme", "dark")))
+        except Exception:
+            pass
+        try:
+            self._apply_auto_ocr()
+            self._apply_auto_chat_watch()
+        except Exception:
+            pass
 
         # --- Global hotkeys via Windows API (multi-action) ---
         # Action map: id -> { "name": label, "vk": int, "mods": int, "handler": cb }
@@ -465,6 +578,9 @@ class Overlay:
             7: {"name": "all_send", "label": "Send to all chat",
                 "vk": 0x59, "mods": MOD_CTRL | MOD_SHIFT,   # Ctrl+Shift+Y
                 "handler": lambda: self.root.after(0, self._hotkey_send_all)},
+            8: {"name": "spam_stop", "label": "Stop chat-spam burst",
+                "vk": 0x51, "mods": MOD_CTRL | MOD_SHIFT,   # Ctrl+Shift+Q
+                "handler": lambda: self.root.after(0, self._spam_stop)},
         }
         # Load overrides from cfg["hotkeys"] if present.
         stored = (self._cfg or {}).get("hotkeys", {}) if hasattr(self, "_cfg") else {}
@@ -476,10 +592,52 @@ class Overlay:
 
         self._hotkey_vk = self._action_defs[1]["vk"]  # back-compat
         self._hotkey_name = _combo_name(self._action_defs[1]["vk"], self._action_defs[1]["mods"])
+        # Labels built earlier used the raw constructor default; refresh
+        # them now that config overrides have been applied so the status
+        # text and Translate button match the real bound hotkey.
+        try:
+            self._btn.configure(text=f"📷 Translate ({self._hotkey_name})")
+        except Exception:
+            pass
+        try:
+            self._status.configure(
+                text=f"Press button or {self._hotkey_name} to translate"
+            )
+        except Exception:
+            pass
         self._hotkey_thread = threading.Thread(
             target=self._hotkey_listener, daemon=True
         )
         self._hotkey_thread.start()
+
+        # --- First-run bootstrap -------------------------------------------
+        # On the very first launch the user's config.json has no "hotkeys"
+        # dict and may be missing auto-mode/theme keys.  Write the current
+        # effective defaults back to disk so (a) Settings always reflects
+        # what's really registered, and (b) the file is ready to be
+        # hand-edited if desired.
+        try:
+            self._bootstrap_defaults()
+        except Exception as e:
+            print(f"[cfg] bootstrap defaults failed: {e}", flush=True)
+
+        # Re-sync auto-mode UI now that cfg is guaranteed to be hydrated.
+        try:
+            self._update_translate_visibility()
+        except Exception:
+            pass
+
+    def _hk_name(self, action_name: str) -> str:
+        """Return the current human-readable combo for `action_name`
+        (e.g. 'translate' -> 'F7', 'paste' -> 'Ctrl+Shift+P'). Used by
+        dynamic tooltips so they update after a rebind."""
+        try:
+            for info in self._action_defs.values():
+                if info.get("name") == action_name:
+                    return _combo_name(info["vk"], info["mods"])
+        except Exception:
+            pass
+        return "?"
 
     # ---- hotkey ----
     _HOTKEY_ID = 1  # legacy — translate action id
@@ -595,15 +753,13 @@ class Overlay:
             self.root.unbind("<Key>", self._rebind_bind_id)
         except Exception:
             pass
-        # Restore the original global Escape=close binding.
+        # Drop the temporary rebind-cancel Escape binding.  We no longer
+        # re-install a global Escape=close handler — the ✕ button is the
+        # only way to close the app now.
         try:
             self.root.unbind("<Escape>", self._rebind_esc_id)
         except Exception:
             pass
-        self.root.bind(
-            "<Escape>",
-            lambda _: (None if self._locked else self._close()),
-        )
         self._rebinding = False
         if new_vk is None:
             self._hotkey_btn.configure(
@@ -796,16 +952,24 @@ class Overlay:
     def _on_lock_toggle(self) -> None:
         self._locked = not self._locked
         if self._locked:
-            self._lock_btn.configure(text="🔒 Locked", bg="#1a2a1a", fg="#8fd88f")
+            self._lock_btn.configure(text="🔒", bg="#1a2a1a", fg="#8fd88f")
             self.text.configure(cursor="arrow")
             # Make the window non-focusable (WS_EX_NOACTIVATE) so clicking
             # on it never steals focus from Dota 2.
             self._apply_noactivate(True)
+            try:
+                self._close_btn.configure(state="disabled")
+            except Exception:
+                pass
             self.set_status("Locked — clicks pass through. Ctrl+Shift+L to unlock", "#7bd88f")
         else:
-            self._lock_btn.configure(text="🔓 Unlocked", bg="#2a1a1a", fg="#d88f8f")
+            self._lock_btn.configure(text="🔓", bg="#2a1a1a", fg="#d88f8f")
             self.text.configure(cursor="fleur")
             self._apply_noactivate(False)
+            try:
+                self._close_btn.configure(state="normal")
+            except Exception:
+                pass
             self.set_status("Unlocked", "#888")
 
     def _tick_foreground_visibility(self) -> None:
@@ -944,6 +1108,11 @@ class Overlay:
             self.text.configure(state="disabled")
         except Exception:
             pass
+        # Shrink overlay back to the default height now that it's empty.
+        try:
+            self._autosize_to_messages(visible=_sz.AUTOSIZE_MESSAGES)
+        except Exception:
+            pass
 
     # ---- logs window ----
     def _on_logs_click(self) -> None:
@@ -978,7 +1147,7 @@ class Overlay:
         # sticks in the title bar corner.
         win.after(150, _apply_icon)
         win.configure(bg="#0a0a0a")
-        win.geometry("760x520")
+        win.geometry(f"{_sz.LOGS_WIDTH}x{_sz.LOGS_HEIGHT}")
         win.attributes("-topmost", True)
 
         bar = tk.Frame(win, bg="#151515", height=30)
@@ -1057,22 +1226,82 @@ class Overlay:
         if self._logs_window is None or not self._logs_window.winfo_exists():
             return
         records = history.read_all()
+        # Remember original indices so pin/delete ops still reference the
+        # right record after sorting.
+        indexed = list(enumerate(records))
+        # Pinned first (stable by recency within each group).
+        indexed.sort(key=lambda p: (not p[1].get("pinned"), p[0]))
+
         txt = self._logs_text
         try:
             txt.configure(state="normal")
+            # Remove any old inline buttons / tags.
+            for name in list(txt.window_names()):
+                try: txt.window_create  # noop — ensure method exists
+                except Exception: pass
             txt.delete("1.0", "end")
-            for r in records:
+            for orig_idx, r in indexed:
                 t   = r.get("t", "")
                 src = r.get("src", "")
                 dst = r.get("dst", "")
-                txt.insert("end", f"[{t}]\n", "time")
+                pinned = bool(r.get("pinned"))
+                # Row header with star + resend + delete buttons.
+                star_char = "★" if pinned else "☆"
+                btn_star = tk.Button(
+                    txt, text=star_char,
+                    bg="#1a1a1a" if not pinned else "#3a2a0a",
+                    fg="#ffd84a" if pinned else "#888",
+                    activebackground="#2a2a2a", activeforeground="#ffd84a",
+                    font=("Consolas", 10, "bold"), relief="flat",
+                    borderwidth=0, padx=4, cursor="hand2",
+                    command=lambda i=orig_idx: self._on_log_pin(i),
+                )
+                btn_resend = tk.Button(
+                    txt, text="⇪ Send",
+                    bg="#1a2a1a", fg="#7bd88f",
+                    activebackground="#2a4a2a", activeforeground="#aaffaa",
+                    font=("Consolas", 8, "bold"), relief="flat",
+                    borderwidth=0, padx=4, cursor="hand2",
+                    command=lambda d=dst: self._on_log_resend(d),
+                )
+                btn_del = tk.Button(
+                    txt, text="✕",
+                    bg="#2a1a1a", fg="#d88f8f",
+                    activebackground="#4a2a2a", activeforeground="#ffaaaa",
+                    font=("Consolas", 9, "bold"), relief="flat",
+                    borderwidth=0, padx=4, cursor="hand2",
+                    command=lambda i=orig_idx: self._on_log_delete(i),
+                )
+                txt.window_create("end", window=btn_star)
+                txt.window_create("end", window=btn_resend)
+                txt.window_create("end", window=btn_del)
+                txt.insert("end", f"  [{t}]\n", "time")
                 txt.insert("end", f"  {src}\n", "src")
                 txt.insert("end", f"  {dst}\n\n", "dst")
             txt.configure(state="disabled")
-            txt.see("end")
-            self._logs_count.config(text=f"{len(records)} entries")
-        except Exception:
-            pass
+            txt.see("1.0")  # show pinned at top
+            pinned_n = sum(1 for r in records if r.get("pinned"))
+            self._logs_count.config(
+                text=f"{len(records)} entries  •  {pinned_n} pinned"
+            )
+        except Exception as e:
+            print(f"[logs] refresh error: {e}", flush=True)
+
+    def _on_log_pin(self, index: int) -> None:
+        from . import history
+        history.toggle_pin(index)
+        self._refresh_logs_text()
+
+    def _on_log_delete(self, index: int) -> None:
+        from . import history
+        history.delete_at(index)
+        self._refresh_logs_text()
+
+    def _on_log_resend(self, text: str) -> None:
+        """One-click re-send: paste this translation into Dota team chat."""
+        if not text:
+            return
+        self._paste_to_dota_chat(text, all_chat=False)
 
     def _drain(self) -> None:
         drained = False
@@ -1095,31 +1324,45 @@ class Overlay:
     def _render(self) -> None:
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
-        for orig, trans in self._messages:
-            # Detect channel from [Tag] and apply color.
-            tag = "all"  # default
+        # Only keep the last 5 translations on screen — no source line,
+        # just the translated text, channel-colored.
+        for orig, trans in self._messages[-5:]:
+            tag = "all"
             orig_lower = orig.lower()
             if "[allies]" in orig_lower:
                 tag = "allies"
             elif "[spectator]" in orig_lower or "[observer]" in orig_lower:
                 tag = "spectator"
-            # Use channel tag for color; "src" only as fallback for [All].
-            self.text.insert("end", f"{orig}\n", tag)
-            self.text.insert("end", f"{trans}\n\n", "dst")
+            self.text.insert("end", f"{trans}\n", tag)
         self.text.see("end")
         self.text.configure(state="disabled")
         # Auto-grow the overlay so at least the last 5 messages fit
         # without scrolling — crucial while locked (click-through), when
         # the user can't scroll at all.
         try:
-            self._autosize_to_messages(visible=5)
+            self._autosize_to_messages(visible=_sz.AUTOSIZE_MESSAGES)
         except Exception:
             pass
 
-    def _autosize_to_messages(self, visible: int = 5) -> None:
+    def _autosize_to_messages(self, visible: int = _sz.AUTOSIZE_MESSAGES) -> None:
         """Resize the overlay height so the last `visible` messages
-        are fully on-screen.  Width and X/Y position are preserved."""
+        are fully on-screen.  Width and X/Y position are preserved.
+
+        When there are no messages, shrink back to the configured
+        default height (MAIN_HEIGHT) so the empty overlay isn't a
+        giant strip of dead space."""
         if not self._messages:
+            try:
+                cur_geo = self.root.geometry()
+                size = cur_geo.split("+", 1)[0]
+                w_str, _ = size.split("x")
+                w = int(w_str)
+                parts = cur_geo.split("+")
+                x = int(parts[1]) if len(parts) > 1 else _sz.MAIN_X
+                y = int(parts[2]) if len(parts) > 2 else _sz.MAIN_Y
+                self.root.geometry(f"{w}x{_sz.MAIN_HEIGHT}+{x}+{y}")
+            except Exception:
+                pass
             return
         msgs = self._messages[-visible:]
         # Each message renders as 3 lines (orig + trans + blank).
@@ -1148,7 +1391,9 @@ class Overlay:
         desired = bar_h + total_display_lines * line_h + 8
         # Clamp: don't make the window absurdly tall.
         screen_h = self.root.winfo_screenheight()
-        desired = max(90, min(desired, int(screen_h * 0.6)))
+        desired = max(_sz.AUTOSIZE_MIN_HEIGHT,
+                      min(desired, _sz.AUTOSIZE_MAX_HEIGHT,
+                          int(screen_h * 0.6)))
 
         cur_geo = self.root.geometry()  # "WxH+X+Y"
         try:
@@ -1202,7 +1447,7 @@ class Overlay:
 
         win = tk.Toplevel(self.root)
         self._settings_window = win
-        win.title("Settings — Hotkeys")
+        win.title("Settings")
         _set_dark_titlebar(win)
         try:
             if self._brand_icon is not None:
@@ -1213,13 +1458,35 @@ class Overlay:
         except Exception:
             pass
         win.configure(bg="#0a0a0a")
-        win.geometry("440x300")
+        win.geometry(f"{_sz.SETTINGS_WIDTH}x{_sz.SETTINGS_HEIGHT}")
 
-        tk.Label(win, text="Click a hotkey to rebind it.",
+        # ── Tabs ──────────────────────────────────────────────────────
+        style = ttk.Style(win)
+        try: style.theme_use("clam")
+        except tk.TclError: pass
+        style.configure("TNotebook", background="#0a0a0a", borderwidth=0)
+        style.configure("TNotebook.Tab",
+                        background="#1a1a1a", foreground="#bbb",
+                        padding=[12, 6], font=("Consolas", 9, "bold"))
+        style.map("TNotebook.Tab",
+                  background=[("selected", "#2a2a1a")],
+                  foreground=[("selected", "#ffd84a")])
+        nb = ttk.Notebook(win)
+        nb.pack(fill="both", expand=True, padx=8, pady=8)
+
+        tab_hk = tk.Frame(nb, bg="#0a0a0a")
+        tab_cap = tk.Frame(nb, bg="#0a0a0a")
+        tab_thm = tk.Frame(nb, bg="#0a0a0a")
+        nb.add(tab_hk,  text="Hotkeys")
+        nb.add(tab_cap, text="Capture")
+        nb.add(tab_thm, text="Theme")
+
+        # ── Hotkeys tab ───────────────────────────────────────────────
+        tk.Label(tab_hk, text="Click a hotkey to rebind it.",
                  bg="#0a0a0a", fg="#bbbbbb",
                  font=("Consolas", 9)).pack(anchor="w", padx=10, pady=(10, 4))
 
-        rows = tk.Frame(win, bg="#0a0a0a")
+        rows = tk.Frame(tab_hk, bg="#0a0a0a")
         rows.pack(fill="both", expand=True, padx=10, pady=4)
 
         row_widgets: dict[int, tk.Button] = {}
@@ -1271,11 +1538,16 @@ class Overlay:
                 self._request_hotkey_reregister()
                 # Persist to config.json.
                 self._persist_hotkeys()
-                # Keep the legacy translate fields in sync.
+                # Keep the Translate button label + status hint in sync.
                 if aid == 1:
                     self._hotkey_vk = vk
                     self._hotkey_name = _combo_name(vk, mods)
-                    self._hotkey_btn.configure(text=f"🎹 {self._hotkey_name}")
+                    try:
+                        self._btn.configure(
+                            text=f"📷 Translate ({self._hotkey_name})"
+                        )
+                    except Exception:
+                        pass
                     self._status.configure(
                         text=f"Press button or {self._hotkey_name} to translate",
                         fg="#555",
@@ -1287,10 +1559,12 @@ class Overlay:
         for aid, info in self._action_defs.items():
             row = tk.Frame(rows, bg="#0a0a0a")
             row.pack(fill="x", pady=3)
+            # Label hugs the left edge and expands so the hotkey button
+            # always sits flush against the right edge of the tab.
             tk.Label(row, text=info["label"] + ":",
                      bg="#0a0a0a", fg="#e0e0e0",
-                     font=("Consolas", 10), width=16, anchor="w"
-                     ).pack(side="left")
+                     font=("Consolas", 10), anchor="w"
+                     ).pack(side="left", fill="x", expand=True)
             btn = tk.Button(
                 row, text=_combo_name(info["vk"], info["mods"]),
                 bg="#2a2a1a", fg="#d8d88f",
@@ -1299,21 +1573,386 @@ class Overlay:
                 relief="flat", padx=10, cursor="hand2",
                 command=lambda a=aid: _start_capture(a),
             )
-            btn.pack(side="left", padx=6)
+            btn.pack(side="right", padx=(6, 0))
             row_widgets[aid] = btn
 
         tk.Label(
-            win,
+            tab_hk,
             text="Tip: combos like Ctrl+Shift+L work globally, while\n"
                  "F-keys alone avoid conflicting with other apps.",
             bg="#0a0a0a", fg="#777",
             font=("Consolas", 8), justify="left"
         ).pack(anchor="w", padx=10, pady=(8, 10))
 
+        # ── Capture tab: auto-OCR loop + auto-translate on chat key ──
+        cfg = self._cfg or {}
+        auto_ocr_var = tk.BooleanVar(value=bool(cfg.get("auto_ocr_enabled", False)))
+        auto_int_var = tk.IntVar(value=int(cfg.get("auto_ocr_interval_sec", 5)))
+        auto_chat_var = tk.BooleanVar(value=bool(cfg.get("auto_translate_on_chat", False)))
+
+        tk.Label(tab_cap, text="Auto-OCR loop",
+                 bg="#0a0a0a", fg="#ffd84a",
+                 font=("Consolas", 10, "bold")
+                 ).pack(anchor="w", padx=12, pady=(14, 2))
+        tk.Label(tab_cap,
+                 text="When enabled, the app automatically runs OCR on\n"
+                      "the chat region every N seconds, with no hotkey press.",
+                 bg="#0a0a0a", fg="#888",
+                 font=("Consolas", 8), justify="left"
+                 ).pack(anchor="w", padx=12)
+        row_ocr = tk.Frame(tab_cap, bg="#0a0a0a")
+        row_ocr.pack(fill="x", padx=12, pady=(6, 2))
+        tk.Checkbutton(
+            row_ocr, text="Enable auto-OCR", variable=auto_ocr_var,
+            bg="#0a0a0a", fg="#e0e0e0", selectcolor="#2a2a1a",
+            activebackground="#0a0a0a", activeforeground="#ffd84a",
+            font=("Consolas", 9), borderwidth=0,
+            command=lambda: (self._set_cfg("auto_ocr_enabled", auto_ocr_var.get()),
+                             self._apply_auto_ocr()),
+        ).pack(side="left")
+        tk.Label(row_ocr, text="Interval (sec):",
+                 bg="#0a0a0a", fg="#bbb",
+                 font=("Consolas", 9)).pack(side="left", padx=(12, 2))
+        sp = tk.Spinbox(
+            row_ocr, from_=2, to=120, width=4, textvariable=auto_int_var,
+            bg="#1a1a1a", fg="#e0e0e0", insertbackground="#e0e0e0",
+            font=("Consolas", 9), relief="flat",
+            command=lambda: (self._set_cfg("auto_ocr_interval_sec", auto_int_var.get()),
+                             self._apply_auto_ocr()),
+        )
+        sp.pack(side="left")
+
+        tk.Label(tab_cap, text="Auto-translate when chat opens",
+                 bg="#0a0a0a", fg="#ffd84a",
+                 font=("Consolas", 10, "bold")
+                 ).pack(anchor="w", padx=12, pady=(16, 2))
+        tk.Label(tab_cap,
+                 text="Triggers OCR automatically the moment you press\n"
+                      "the Dota chat key (Enter), no F7 needed.",
+                 bg="#0a0a0a", fg="#888",
+                 font=("Consolas", 8), justify="left"
+                 ).pack(anchor="w", padx=12)
+        tk.Checkbutton(
+            tab_cap, text="Enable auto-translate on chat open",
+            variable=auto_chat_var,
+            bg="#0a0a0a", fg="#e0e0e0", selectcolor="#2a2a1a",
+            activebackground="#0a0a0a", activeforeground="#ffd84a",
+            font=("Consolas", 9), borderwidth=0,
+            command=lambda: (self._set_cfg("auto_translate_on_chat", auto_chat_var.get()),
+                             self._apply_auto_chat_watch()),
+        ).pack(anchor="w", padx=12, pady=(6, 2))
+
+        # ── Theme tab ─────────────────────────────────────────────────
+        theme_var = tk.StringVar(value=str(cfg.get("theme", "dark")))
+        tk.Label(tab_thm, text="Overlay theme",
+                 bg="#0a0a0a", fg="#ffd84a",
+                 font=("Consolas", 10, "bold")
+                 ).pack(anchor="w", padx=12, pady=(14, 4))
+        for val, label, desc in (
+            ("dark",        "Dark",        "Solid dark background (default)."),
+            ("light",       "Light",       "Light background with dark text."),
+            ("transparent", "Transparent", "Text floats with no background panel."),
+        ):
+            r = tk.Frame(tab_thm, bg="#0a0a0a")
+            r.pack(fill="x", padx=12, pady=2)
+            tk.Radiobutton(
+                r, text=label, variable=theme_var, value=val,
+                bg="#0a0a0a", fg="#e0e0e0", selectcolor="#2a2a1a",
+                activebackground="#0a0a0a", activeforeground="#ffd84a",
+                font=("Consolas", 10, "bold"), borderwidth=0, width=12, anchor="w",
+                command=lambda v=val: (self._set_cfg("theme", v),
+                                       self._apply_theme(v)),
+            ).pack(side="left")
+            tk.Label(r, text=desc, bg="#0a0a0a", fg="#777",
+                     font=("Consolas", 8)).pack(side="left", padx=6)
+
         win.bind("<Escape>", lambda _e: win.destroy())
         win.protocol("WM_DELETE_WINDOW", lambda: (
             setattr(self, "_settings_window", None), win.destroy()
         ))
+
+    def _bootstrap_defaults(self) -> None:
+        """Make sure every setting the app reads has a value in cfg +
+        on disk.  Runs once at startup after _action_defs is built.
+
+        Without this, a brand-new config.json has no `hotkeys` block and
+        no `auto_*`/`theme` keys, so the Settings tab just shows code
+        defaults that don't match anything persisted — confusing after a
+        restart.  This writes the current effective state back so what
+        you see is what's loaded.
+        """
+        if self._cfg is None:
+            self._cfg = {}
+        import json
+        here = Path(__file__).resolve().parent.parent
+        cfg_path = here / "config.json"
+        if getattr(sys, "frozen", False):
+            alt = Path(sys.executable).parent / "config.json"
+            if alt.is_file():
+                cfg_path = alt
+
+        data: dict = {}
+        if cfg_path.is_file():
+            try:
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+
+        dirty = False
+
+        # 1. Hotkeys: build {name: {vk, mods}} from current action_defs.
+        hk_block = dict(data.get("hotkeys") or {})
+        for info in self._action_defs.values():
+            name = info["name"]
+            cur = hk_block.get(name) or {}
+            want = {"vk": int(info["vk"]), "mods": int(info["mods"])}
+            if cur != want:
+                hk_block[name] = want
+                dirty = True
+        if dirty or "hotkeys" not in data:
+            data["hotkeys"] = hk_block
+            dirty = True
+
+        # 2. Scalar settings with sensible defaults.
+        scalar_defaults = {
+            "theme": str((self._cfg or {}).get("theme", "dark")),
+            "auto_ocr_enabled": bool((self._cfg or {}).get("auto_ocr_enabled", False)),
+            "auto_ocr_interval_sec": int((self._cfg or {}).get("auto_ocr_interval_sec", 5)),
+            "auto_translate_on_chat": bool((self._cfg or {}).get("auto_translate_on_chat", False)),
+            "dota_chat_key": str((self._cfg or {}).get("dota_chat_key", "Return")),
+        }
+        for k, v in scalar_defaults.items():
+            if k not in data:
+                data[k] = v
+                dirty = True
+            # Also mirror into in-memory cfg so other code paths see it.
+            self._cfg.setdefault(k, data[k])
+
+        if dirty:
+            try:
+                cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                cfg_path.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                print(f"[cfg] first-run defaults written to {cfg_path}",
+                      flush=True)
+            except Exception as e:
+                print(f"[cfg] write defaults failed: {e}", flush=True)
+
+    def _set_cfg(self, key: str, value) -> None:
+        """Update a top-level config key in memory and on disk."""
+        if self._cfg is None:
+            self._cfg = {}
+        self._cfg[key] = value
+        try:
+            import json
+            here = Path(__file__).resolve().parent.parent
+            cfg_path = here / "config.json"
+            if getattr(sys, "frozen", False):
+                alt = Path(sys.executable).parent / "config.json"
+                if alt.is_file():
+                    cfg_path = alt
+            data = {}
+            if cfg_path.is_file():
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            data[key] = value
+            cfg_path.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            print(f"[cfg] persist {key} failed: {e}", flush=True)
+
+    # ---- Theme ----
+    def _apply_theme(self, theme: str) -> None:
+        """Repaint the main overlay with the chosen theme."""
+        try:
+            if theme == "light":
+                bg, text_bg, fg = "#f4f4f4", "#ffffff", "#222"
+                self.root.attributes("-alpha", max(0.75, self._alpha))
+                tag_colors = {"dst": "#1a5a1a", "allies": "#1a4a8a",
+                              "all": "#222222", "spectator": "#555555",
+                              "src": "#555555"}
+            elif theme == "transparent":
+                # Text floats directly over Dota.  Use black bold text —
+                # coloured text (green/blue) disappears against grass /
+                # sky / creep textures.  Black + bold reads on almost
+                # any background.
+                bg, text_bg, fg = "#010101", "#010101", "#000000"
+                self.root.attributes("-alpha", self._alpha)
+                try:
+                    # Make the exact bg color invisible via Tk's
+                    # -transparentcolor attribute (Windows-only).
+                    self.root.attributes("-transparentcolor", "#010101")
+                except Exception:
+                    pass
+                tag_colors = {"dst": "#000000", "allies": "#000000",
+                              "all": "#000000", "spectator": "#000000",
+                              "src": "#000000"}
+            else:  # dark (default)
+                bg, text_bg, fg = "#0a0a0a", "#0a0a0a", "#e0e0e0"
+                try:
+                    self.root.attributes("-transparentcolor", "")
+                except Exception:
+                    pass
+                self.root.attributes("-alpha", self._alpha)
+                tag_colors = {"dst": "#7bd88f", "allies": "#6bb8ff",
+                              "all": "#e0e0e0", "spectator": "#aaaaaa",
+                              "src": "#8a8a8a"}
+            try:
+                self.root.configure(bg=bg)
+                self.text.configure(bg=text_bg, fg=fg, insertbackground=fg)
+                # Scrollbar trough + the frame that holds it must also use
+                # the transparent key color, otherwise a dark bar shows on
+                # the right edge in transparent mode.
+                try:
+                    if getattr(self, "_text_frame", None) is not None:
+                        self._text_frame.configure(bg=text_bg)
+                except Exception:
+                    pass
+                try:
+                    style = ttk.Style(self.root)
+                    style.configure(
+                        "Dark.Vertical.TScrollbar",
+                        background=text_bg,
+                        troughcolor=text_bg,
+                        bordercolor=text_bg,
+                        arrowcolor=text_bg,
+                        darkcolor=text_bg,
+                        lightcolor=text_bg,
+                    )
+                except Exception:
+                    pass
+                for tag, color in tag_colors.items():
+                    try:
+                        if theme == "transparent":
+                            self.text.tag_configure(
+                                tag, foreground=color,
+                                font=("Consolas", self._font_size, "bold"),
+                            )
+                        else:
+                            self.text.tag_configure(
+                                tag, foreground=color, font="",
+                            )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # ---- Auto-OCR loop ----
+    def _update_translate_visibility(self) -> None:
+        """Hide the Translate button + status placeholder when an
+        automatic translation mode is active (auto-OCR loop or
+        auto-translate-on-chat-open).  Manual F7 still works either way;
+        this just removes the redundant UI.
+
+        Note: we can't use `winfo_ismapped()` to detect current packing
+        because it returns False before the Tk mainloop starts (first
+        run bug).  Track state in `self._btn_visible` instead.
+        """
+        cfg = self._cfg or {}
+        auto = bool(cfg.get("auto_ocr_enabled")) or bool(cfg.get("auto_translate_on_chat"))
+        if not hasattr(self, "_btn_visible"):
+            self._btn_visible = True  # button is packed by default in __init__
+        try:
+            if auto:
+                if self._btn_visible:
+                    try: self._btn.pack_forget()
+                    except Exception: pass
+                    self._btn_visible = False
+                cur = self._status.cget("text")
+                if cur.startswith("Press button") or cur.strip() == "":
+                    self._status.configure(text="Auto mode — translating automatically")
+            else:
+                if not self._btn_visible:
+                    try:
+                        self._btn.pack(side="left", padx=4, pady=2,
+                                       before=self._resize_btn)
+                    except Exception:
+                        try:
+                            self._btn.pack(side="left", padx=4, pady=2)
+                        except Exception:
+                            pass
+                    self._btn_visible = True
+                cur = self._status.cget("text")
+                if cur.startswith("Auto mode"):
+                    self._status.configure(
+                        text=f"Press button or {self._hotkey_name} to translate"
+                    )
+        except Exception:
+            pass
+
+    def _apply_auto_ocr(self) -> None:
+        """(Re)start/stop the auto-OCR timer based on current config."""
+        # Cancel any pending scheduled trigger.
+        if getattr(self, "_auto_ocr_after", None) is not None:
+            try: self.root.after_cancel(self._auto_ocr_after)
+            except Exception: pass
+            self._auto_ocr_after = None
+        cfg = self._cfg or {}
+        self._update_translate_visibility()
+        if not cfg.get("auto_ocr_enabled"):
+            return
+        interval = max(2, int(cfg.get("auto_ocr_interval_sec", 5)))
+        def _tick():
+            try:
+                # Only fire when Dota is focused (don't waste cycles
+                # OCRing the desktop / browser).
+                if self._auto_hidden:
+                    pass
+                else:
+                    self._trigger_event.set()
+            except Exception:
+                pass
+            self._auto_ocr_after = self.root.after(interval * 1000, _tick)
+        self._auto_ocr_after = self.root.after(interval * 1000, _tick)
+
+    # ---- Auto-translate on Dota chat-key press ----
+    def _apply_auto_chat_watch(self) -> None:
+        """(Re)start/stop a poll that watches for the Dota chat key
+        (Return/Enter by default) being pressed while Dota is focused."""
+        if getattr(self, "_chat_watch_after", None) is not None:
+            try: self.root.after_cancel(self._chat_watch_after)
+            except Exception: pass
+            self._chat_watch_after = None
+        cfg = self._cfg or {}
+        self._update_translate_visibility()
+        if not cfg.get("auto_translate_on_chat"):
+            self._chat_key_was_down = False
+            return
+        # Resolve the chat key VK from config string ("Return", "Y", etc.)
+        key_name = str(cfg.get("dota_chat_key", "Return"))
+        vk = _KEYSYM_TO_VK.get(key_name)
+        if vk is None and len(key_name) == 1 and key_name.isalnum():
+            vk = ord(key_name.upper())
+        if vk is None:
+            vk = 0x0D  # VK_RETURN
+        self._chat_watch_vk = vk
+        self._chat_key_was_down = False
+
+        def _poll():
+            try:
+                # Only listen while Dota is the foreground window, so
+                # pressing Enter in the browser or paste window doesn't
+                # trigger a bogus OCR capture.
+                if not self._auto_hidden:
+                    u32 = ctypes.windll.user32
+                    state = u32.GetAsyncKeyState(self._chat_watch_vk)
+                    pressed = bool(state & 0x8000)
+                    if pressed and not self._chat_key_was_down:
+                        # Dota just opened the chat box.  Give it a
+                        # tick to render, then trigger OCR.
+                        self.root.after(350, lambda: self._trigger_event.set())
+                    self._chat_key_was_down = pressed
+                else:
+                    self._chat_key_was_down = False
+            except Exception:
+                pass
+            self._chat_watch_after = self.root.after(60, _poll)
+        self._chat_watch_after = self.root.after(60, _poll)
 
     def _persist_hotkeys(self) -> None:
         """Write current action hotkeys to config.json under 'hotkeys'."""
@@ -1341,6 +1980,113 @@ class Overlay:
             )
         except Exception as e:
             print(f"[settings] persist failed: {e}", flush=True)
+
+    # ---------- chat-spam burst (survives Paste window close) ----------
+    def _spam_update_ui(self) -> None:
+        """Show/hide + relabel the main-bar Stop button.
+
+        We can't rely on winfo_ismapped() (it lies before mainloop and
+        during rapid show/hide cycles), so pack_forget / pack are called
+        unconditionally — both are idempotent.
+        """
+        try:
+            if self._spam.get("active") and self._spam.get("remaining", 0) > 0:
+                try:
+                    self._spam_stop_btn.configure(
+                        text=f"⏹ Stop ({self._spam['remaining']})"
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._spam_stop_btn.pack(
+                        side="left", padx=(6, 2), pady=2, before=self._close_btn
+                    )
+                except Exception:
+                    pass
+            else:
+                try: self._spam_stop_btn.pack_forget()
+                except Exception: pass
+        except Exception:
+            pass
+
+    def _spam_stop(self) -> None:
+        self._spam["active"] = False
+        if self._spam.get("after") is not None:
+            try: self.root.after_cancel(self._spam["after"])
+            except Exception: pass
+            self._spam["after"] = None
+        self._spam["remaining"] = 0
+        # If the paste window is still open, reset its Stop button too.
+        win = self._spam.get("win")
+        if win is not None:
+            try:
+                if win.winfo_exists() and getattr(self, "_paste_stop_btn", None):
+                    self._paste_stop_btn.configure(state="disabled")
+            except Exception:
+                pass
+        self._spam["count_var"] = None
+        self._spam["status_lbl"] = None
+        self._spam["win"] = None
+        self._spam_update_ui()
+
+    def _spam_send(self, text: str, all_chat: bool,
+                   count: int,
+                   count_var: tk.IntVar | None = None,
+                   status_lbl: tk.Label | None = None,
+                   win: tk.Toplevel | None = None) -> None:
+        """Send `text` into Dota chat `count` times with a ~900ms gap.
+        Safe to call while Paste window is closed."""
+        if self._spam["active"]:
+            if status_lbl is not None:
+                try:
+                    status_lbl.config(text="Already sending — press Stop first",
+                                      fg="#ff6b6b")
+                except Exception: pass
+            return
+        n = max(1, int(count))
+        self._spam.update({
+            "active": True, "remaining": n,
+            "count_var": count_var, "status_lbl": status_lbl,
+            "win": win,
+        })
+        if getattr(self, "_paste_stop_btn", None) is not None:
+            try: self._paste_stop_btn.configure(state="normal")
+            except Exception: pass
+        self._spam_update_ui()
+
+        def _one():
+            if not self._spam["active"] or self._spam["remaining"] <= 0:
+                self._spam_stop()
+                return
+            try:
+                self._paste_to_dota_chat(text, all_chat=all_chat)
+            except Exception as e:
+                if self._spam.get("status_lbl") is not None:
+                    try:
+                        self._spam["status_lbl"].config(
+                            text=f"Send failed: {e}", fg="#ff6b6b")
+                    except Exception: pass
+                self._spam_stop()
+                return
+            self._spam["remaining"] -= 1
+            cv = self._spam.get("count_var")
+            if cv is not None:
+                try: cv.set(self._spam["remaining"])
+                except Exception: pass
+            self._spam_update_ui()
+            if self._spam["remaining"] <= 0:
+                sl = self._spam.get("status_lbl")
+                self._spam_stop()
+                if sl is not None:
+                    try:
+                        sl.config(text="Done ✓", fg="#7bd88f")
+                        self.root.after(1500,
+                                        lambda: sl.config(text=""))
+                    except Exception: pass
+                return
+            self._spam["after"] = self.root.after(900, _one)
+
+        _one()
 
     def _on_paste_click(self) -> None:
         if self._paste_window is not None and self._paste_window.winfo_exists():
@@ -1382,7 +2128,7 @@ class Overlay:
         # sticks in the title bar corner.
         win.after(150, _apply_icon)
         win.configure(bg="#0a0a0a")
-        win.geometry("700x340")
+        win.geometry(f"{_sz.PASTE_WIDTH}x{_sz.PASTE_HEIGHT}")
         win.resizable(True, True)
         win.attributes("-topmost", True)
 
@@ -1518,32 +2264,65 @@ class Overlay:
             do_translate()
             return result_txt.get("1.0", "end").strip()
 
+        team_count_var = tk.IntVar(value=1)
+        all_count_var = tk.IntVar(value=1)
+
         def do_send_team():
             text = _ensure_translated()
             if not text:
                 status_lbl.config(text="Type something first", fg="#ff6b6b")
                 return
-            self._paste_to_dota_chat(text, all_chat=False)
+            try: n = max(1, int(team_count_var.get()))
+            except Exception: n = 1
+            self._spam_send(text, all_chat=False, count=n,
+                            count_var=team_count_var,
+                            status_lbl=status_lbl, win=win)
 
         def do_send_all():
             text = _ensure_translated()
             if not text:
                 status_lbl.config(text="Type something first", fg="#ff6b6b")
                 return
-            self._paste_to_dota_chat(text, all_chat=True)
+            try: n = max(1, int(all_count_var.get()))
+            except Exception: n = 1
+            self._spam_send(text, all_chat=True, count=n,
+                            count_var=all_count_var,
+                            status_lbl=status_lbl, win=win)
 
-        for label, cmd, bg, fg in (
-            ("🔄 Translate",   do_translate, "#1a3a1a", "#7bd88f"),
-            ("✨ Fix grammar", do_fix_grammar, "#3a2a1a", "#d8c88f"),
-            ("📋 Copy result", do_copy_result, "#1a2a3a", "#8fa8d8"),
-            ("👥 Team chat",   do_send_team, "#1a1a3a", "#8fa8ff"),
-            ("🌐 All chat",    do_send_all,  "#2a1a1a", "#d88f8f"),
-        ):
-            tk.Button(btn_fr, text=label, command=cmd,
-                      bg=bg, fg=fg, activebackground="#2a2a2a",
-                      activeforeground=fg, font=("Consolas", 9, "bold"),
-                      relief="flat", padx=8, cursor="hand2",
-                      ).pack(side="left", padx=2, pady=3)
+        def _mk_btn(parent, label, cmd, bg, fg):
+            return tk.Button(parent, text=label, command=cmd,
+                             bg=bg, fg=fg, activebackground="#2a2a2a",
+                             activeforeground=fg, font=("Consolas", 9, "bold"),
+                             relief="flat", padx=8, cursor="hand2")
+
+        def _mk_count(parent, var: tk.IntVar):
+            sp = tk.Spinbox(parent, from_=1, to=99, width=3,
+                            textvariable=var,
+                            bg="#1a1a1a", fg="#e0e0e0",
+                            buttonbackground="#2a2a2a",
+                            insertbackground="#e0e0e0",
+                            relief="flat", font=("Consolas", 9, "bold"))
+            return sp
+
+        _mk_btn(btn_fr, "🔄 Translate",   do_translate,    "#1a3a1a", "#7bd88f"
+                ).pack(side="left", padx=2, pady=3)
+        _mk_btn(btn_fr, "✨ Fix grammar", do_fix_grammar,  "#3a2a1a", "#d8c88f"
+                ).pack(side="left", padx=2, pady=3)
+        _mk_btn(btn_fr, "📋 Copy result", do_copy_result,  "#1a2a3a", "#8fa8d8"
+                ).pack(side="left", padx=2, pady=3)
+
+        _mk_btn(btn_fr, "👥 Team chat", do_send_team, "#1a1a3a", "#8fa8ff"
+                ).pack(side="left", padx=(6, 0), pady=3)
+        _mk_count(btn_fr, team_count_var).pack(side="left", padx=(2, 0), pady=3)
+
+        _mk_btn(btn_fr, "🌐 All chat", do_send_all, "#2a1a1a", "#d88f8f"
+                ).pack(side="left", padx=(6, 0), pady=3)
+        _mk_count(btn_fr, all_count_var).pack(side="left", padx=(2, 0), pady=3)
+
+        stop_btn = _mk_btn(btn_fr, "⏹ Stop", self._spam_stop, "#3a1a1a", "#ff8888")
+        stop_btn.pack(side="left", padx=(8, 2), pady=3)
+        stop_btn.configure(state="normal" if self._spam["active"] else "disabled")
+        self._paste_stop_btn = stop_btn
 
         # Status label on its OWN row below buttons so it's never clipped.
         status_lbl = tk.Label(win, text="", bg="#0a0a0a",
@@ -1563,6 +2342,18 @@ class Overlay:
         txt.bind("<Shift-Return>",   lambda e: (do_translate(), win.after(300, do_send_all),  "break"))
         win.bind("<Escape>", lambda _e: win.destroy())
         def _on_close():
+            # Do NOT stop an in-flight burst — the user can still cancel
+            # it from the main overlay's "⏹ Stop (N)" button.  Just
+            # detach paste-window-specific refs so callbacks don't try
+            # to touch destroyed widgets.
+            try:
+                if self._spam.get("win") is win:
+                    self._spam["win"] = None
+                    self._spam["count_var"] = None
+                    self._spam["status_lbl"] = None
+            except Exception:
+                pass
+            self._paste_stop_btn = None
             self._paste_window = None
             self._paste_input = None
             self._paste_send_team = None

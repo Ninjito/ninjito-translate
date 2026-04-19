@@ -79,3 +79,31 @@ def clear() -> None:
 
 def file_path() -> Path:
     return HISTORY_FILE
+
+
+def _rewrite(records: list[dict]) -> None:
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with _lock, open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def toggle_pin(index: int) -> bool:
+    """Toggle the 'pinned' flag on record `index` (0-based, oldest-first).
+    Returns the new pinned state. Returns False on error."""
+    recs = read_all()
+    if not (0 <= index < len(recs)):
+        return False
+    recs[index]["pinned"] = not bool(recs[index].get("pinned"))
+    _rewrite(recs)
+    return bool(recs[index]["pinned"])
+
+
+def delete_at(index: int) -> None:
+    recs = read_all()
+    if 0 <= index < len(recs):
+        del recs[index]
+        _rewrite(recs)

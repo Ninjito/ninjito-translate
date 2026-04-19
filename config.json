@@ -1,9 +1,9 @@
 {
   "chat_region_relative": {
-    "left": 592,
+    "left": 640,
     "top": 607,
-    "width": 765,
-    "height": 151
+    "width": 717,
+    "height": 153
   },
   "ocr_language": "ru",
   "target_language": "en",
@@ -43,6 +43,22 @@
     "settings": {
       "vk": 77,
       "mods": 6
+    },
+    "team_send": {
+      "vk": 84,
+      "mods": 6
+    },
+    "all_send": {
+      "vk": 89,
+      "mods": 6
+    },
+    "spam_stop": {
+      "vk": 81,
+      "mods": 6
     }
-  }
+  },
+  "auto_translate_on_chat": true,
+  "auto_ocr_enabled": true,
+  "theme": "dark",
+  "auto_ocr_interval_sec": 5
 }

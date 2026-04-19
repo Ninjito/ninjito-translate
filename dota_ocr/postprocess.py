@@ -36,6 +36,9 @@ _HOMOGLYPH_MAP = {
     "u": "и",   # lowercase и sometimes recognized as u
     "i": "и",
     "b": "ь",   # soft sign sometimes recognized as b
+    "r": "г",   # lowercase г often recognized as r
+    "t": "т",   # lowercase т often recognized as t  (matches uppercase T->Т)
+    "m": "м",   # lowercase м often recognized as m
     # NOTE: we intentionally *don't* map digits (6→б, 3→з) even though
     # OCR sometimes confuses them, because real numbers ("5 minutes",
     # "killed 6") show up in chat and we'd corrupt them.
@@ -89,6 +92,19 @@ _CHAT_TAG_RE = re.compile(
 _ANY_TAG_RE = re.compile(r"\[[A-Za-zА-Яа-я][^\]]{0,20}\].*:")
 
 
+# Require a player-name token between the channel tag and the ':'.
+# Rejects OCR garbage like "[Allies]  : test" (empty name).
+_EMPTY_NAME_RE = re.compile(
+    r"\[\s*(?:Allies|All|Spectator|Observer|Party|Союзники|Все)\s*\]"
+    r"\s*[^\s:\[\]]",   # at least ONE non-space non-colon non-bracket char
+    re.IGNORECASE,
+)
+# Prefix before the channel tag is supposed to be nothing, or at most
+# one or two icon misreads. If the prefix contains digits or sentence-
+# like tokens, it's OCR noise ("22 55 [Allies] : test").
+_GARBAGE_PREFIX_RE = re.compile(r"^[^\[]*[0-9]")
+
+
 def is_chat_line(text: str) -> bool:
     """Return True if the line is a player-typed Dota chat message.
 
@@ -114,6 +130,32 @@ def is_chat_line(text: str) -> bool:
     # Must have a ':' separator — every chat line is "Name : message".
     if ':' not in t:
         return False
+
+    prefix_to_colon = t[: t.index(':')]
+    tag_match = _CHAT_TAG_RE.search(t)
+    if tag_match:
+        # Real channel tag detected. The ONLY hard-reject rule is
+        # "digits before the channel tag" — that reliably identifies
+        # OCR garbage like "22 55 [Allies] : test".
+        #
+        # We deliberately do NOT require a player name between the tag
+        # and ':' — Dota renders player names in team blue, which the
+        # OCR brightness threshold often drops, producing legitimate
+        # chat lines like "[Allies]          :  тест".
+        tag_start = tag_match.start()
+        pre_tag = prefix_to_colon[:tag_start]
+        if _GARBAGE_PREFIX_RE.match(pre_tag):
+            return False
+    elif '[' in prefix_to_colon:
+        # Bracketed token that isn't a known channel keyword. Could be
+        # a garbled channel tag. Reject only when the bracket content
+        # shows *strong* corruption signals: pipes, slashes, digits,
+        # semicolons — real clan/channel tags are letters only.
+        first = re.search(r"\[([^\]]{1,12})\]", prefix_to_colon)
+        if first is not None:
+            inner = first.group(1)
+            if re.search(r"[|/\\;0-9]", inner):
+                return False
 
     # Accept any of these formats:
     #   [Allies] Ninjito [ISSUE] : msg   (channel tag + clan)
