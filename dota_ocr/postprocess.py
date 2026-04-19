@@ -45,7 +45,22 @@ _HOMOGLYPH_MAP = {
 }
 
 
+# Token-level OCR mistranscriptions that single-char homoglyph mapping
+# can't fix — e.g. "из" (2 narrow Cyrillic chars) often gets merged and
+# re-rendered as "m3". Applied before char-level mapping, word-boundary
+# aware so we don't corrupt inside bigger tokens.
+_TOKEN_FIXES = {
+    "m3": "из",
+    "M3": "Из",
+    "u3": "из",
+    "U3": "Из",
+}
+
 def _convert_body(text: str) -> str:
+    # Token fixes first (word-boundary).
+    for bad, good in _TOKEN_FIXES.items():
+        text = re.sub(rf"(?<![A-Za-zА-Яа-я0-9]){re.escape(bad)}(?![A-Za-zА-Яа-я0-9])",
+                      good, text)
     return "".join(_HOMOGLYPH_MAP.get(c, c) for c in text)
 
 

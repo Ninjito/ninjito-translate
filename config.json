@@ -60,5 +60,5 @@
   "auto_translate_on_chat": true,
   "auto_ocr_enabled": true,
   "theme": "dark",
-  "auto_ocr_interval_sec": 5
+  "auto_ocr_interval_sec": 2
 }

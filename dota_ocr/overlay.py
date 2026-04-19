@@ -678,6 +678,36 @@ class Overlay:
                     aid = int(msg.wParam)
                     info = self._action_defs.get(aid)
                     if info is not None:
+                        # Source-level per-action cooldown: drops WM_HOTKEY
+                        # auto-repeat AND rapid mashing that would otherwise
+                        # queue up N callbacks on Tk's after() queue and fire
+                        # them all at once when the mainloop unblocks.
+                        import time as _time
+                        now_ms = _time.monotonic() * 1000.0
+                        if not hasattr(self, "_hk_last_fire"):
+                            self._hk_last_fire = {}
+                        if now_ms - self._hk_last_fire.get(aid, 0.0) < 250:
+                            continue
+                        # Also drain any WM_HOTKEY with the same aid that
+                        # arrived while we were blocked — those are mashes
+                        # that must not replay later.
+                        try:
+                            peek = ctypes.wintypes.MSG()
+                            PM_REMOVE = 0x0001
+                            while user32.PeekMessageW(
+                                ctypes.byref(peek), None,
+                                0x0312, 0x0312, PM_REMOVE
+                            ):
+                                if int(peek.wParam) != aid:
+                                    # Re-post non-matching hotkey so we
+                                    # still handle it next iteration.
+                                    user32.PostThreadMessageW(
+                                        self._hotkey_thread_id,
+                                        0x0312, peek.wParam, peek.lParam)
+                                    break
+                        except Exception:
+                            pass
+                        self._hk_last_fire[aid] = now_ms
                         try:
                             info["handler"]()
                         except Exception:
@@ -950,6 +980,14 @@ class Overlay:
 
     # ---- lock / unlock ----
     def _on_lock_toggle(self) -> None:
+        # Same WM_HOTKEY auto-repeat debounce as the aux-window toggles.
+        import time as _time
+        now = _time.monotonic() * 1000.0
+        if not hasattr(self, "_toggle_last_ms"):
+            self._toggle_last_ms = {}
+        if now - self._toggle_last_ms.get("_lock", 0.0) < 180:
+            return
+        self._toggle_last_ms["_lock"] = now
         self._locked = not self._locked
         if self._locked:
             self._lock_btn.configure(text="🔒", bg="#1a2a1a", fg="#8fd88f")
@@ -1115,14 +1153,108 @@ class Overlay:
             pass
 
     # ---- logs window ----
-    def _on_logs_click(self) -> None:
-        # Toggle: if already open, close it.
-        if self._logs_window is not None and self._logs_window.winfo_exists():
+    def _toggle_aux_window(self, attr_name: str, *, _debounce_ms: int = 180) -> bool:
+        """Debounce rapid hotkey auto-repeat: ignore toggle calls that
+        arrive within _debounce_ms of the previous one for the same
+        window. Without this, holding the hotkey briefly fires WM_HOTKEY
+        multiple times — the first press closes, the next reopens, and
+        the user sees "hotkey doesn't close the window"."""
+        import time as _time
+        now = _time.monotonic() * 1000.0
+        if not hasattr(self, "_toggle_last_ms"):
+            self._toggle_last_ms = {}
+        last = self._toggle_last_ms.get(attr_name, 0.0)
+        if now - last < _debounce_ms:
+            # Swallow this call — it's a repeat, not a real press.
+            return True
+        self._toggle_last_ms[attr_name] = now
+        return self._toggle_aux_window_impl(attr_name)
+
+    def _toggle_aux_window_impl(self, attr_name: str) -> bool:
+        """Shared toggle logic for Logs/Settings/Paste.
+
+        Returns True if the toggle *closed or restored* the existing
+        window and the caller should bail out; False if the window
+        needs to be created fresh.
+
+        Handles every edge-case we've hit:
+          * winfo_exists() false positives after race with auto-hide
+          * state() raising (Tk interpreter already torn down)
+          * window withdrawn by auto-hide → restore + focus, don't
+            destroy
+          * stale reference after manual X close
+        """
+        w = getattr(self, attr_name, None)
+        if w is None:
+            return False
+        # Is it still a live Tk widget?
+        try:
+            alive = bool(w.winfo_exists())
+        except Exception:
+            alive = False
+        if not alive:
+            setattr(self, attr_name, None)
+            return False
+        # Mapped? (visible vs withdrawn / iconic)
+        try:
+            st = w.state()
+        except Exception:
+            st = "normal"
+        if st in ("withdrawn", "iconic"):
+            # Auto-hidden — restore instead of destroying.
+            # Clear _auto_hidden so the foreground ticker doesn't
+            # immediately re-withdraw us while Dota is still fg.
+            self._auto_hidden = False
             try:
-                self._logs_window.destroy()
+                # Alt-tap: grants our process foreground privilege so
+                # SetForegroundWindow succeeds when invoked from a
+                # global hotkey while Dota is the fg window.
+                try:
+                    import ctypes as _ct
+                    u32 = _ct.windll.user32
+                    u32.keybd_event(0x12, 0, 0, 0)         # Alt down
+                    u32.keybd_event(0x12, 0, 0x0002, 0)    # Alt up
+                except Exception:
+                    pass
+                w.deiconify()
+                w.lift()
+                try: w.attributes("-topmost", True)
+                except Exception: pass
+                try:
+                    import ctypes as _ct
+                    u32 = _ct.windll.user32
+                    hwnd = u32.GetParent(w.winfo_id()) or w.winfo_id()
+                    u32.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+                w.focus_force()
+                # Also restore siblings so the whole UI comes back
+                # together, matching the tick's behaviour.
+                try: self.root.deiconify()
+                except Exception: pass
+                for sib in (self._logs_window, self._paste_window,
+                            self._settings_window):
+                    if sib is None or sib is w:
+                        continue
+                    try:
+                        if sib.winfo_exists() and sib.state() in ("withdrawn", "iconic"):
+                            sib.deiconify()
+                    except Exception:
+                        pass
             except Exception:
-                pass
-            self._logs_window = None
+                try: w.destroy()
+                except Exception: pass
+                setattr(self, attr_name, None)
+                return False
+            return True
+        # Normal visible toggle → close.
+        try: w.destroy()
+        except Exception: pass
+        setattr(self, attr_name, None)
+        return True
+
+    def _on_logs_click(self) -> None:
+        if self._toggle_aux_window("_logs_window"):
             return
 
         from . import history
@@ -1436,13 +1568,8 @@ class Overlay:
 
     # ---- Settings window ----
     def _on_settings_click(self) -> None:
-        # Toggle: if already open, close it.
-        if self._settings_window is not None and self._settings_window.winfo_exists():
-            try:
-                self._settings_window.destroy()
-            except Exception:
-                pass
-            self._settings_window = None
+        # Toggle: if already open (even if withdrawn by auto-hide), toggle/restore.
+        if self._toggle_aux_window("_settings_window"):
             return
 
         win = tk.Toplevel(self.root)
@@ -2089,23 +2216,16 @@ class Overlay:
         _one()
 
     def _on_paste_click(self) -> None:
-        if self._paste_window is not None and self._paste_window.winfo_exists():
-            try:
-                # Toggle close — or restore if currently minimized.
-                if self._paste_window.state() in ("iconic", "withdrawn"):
-                    self._paste_window.deiconify()
-                    self._paste_window.lift()
-                    self._paste_window.focus_force()
-                    try:
-                        if self._paste_input is not None:
-                            self._paste_input.focus_set()
-                    except Exception:
-                        pass
-                    return
-                self._paste_window.destroy()
-            except Exception:
-                pass
-            self._paste_window = None
+        # Unified toggle handles destroy/restore across auto-hide edge cases.
+        if self._toggle_aux_window("_paste_window"):
+            # If we just restored (window still alive), refocus the input.
+            w = self._paste_window
+            if w is not None:
+                try:
+                    if self._paste_input is not None:
+                        self._paste_input.focus_set()
+                except Exception:
+                    pass
             return
 
         win = tk.Toplevel(self.root)
@@ -2341,11 +2461,15 @@ class Overlay:
         txt.bind("<Control-Return>", lambda e: (do_translate(), win.after(300, do_send_team), "break"))
         txt.bind("<Shift-Return>",   lambda e: (do_translate(), win.after(300, do_send_all),  "break"))
         win.bind("<Escape>", lambda _e: win.destroy())
-        def _on_close():
-            # Do NOT stop an in-flight burst — the user can still cancel
-            # it from the main overlay's "⏹ Stop (N)" button.  Just
-            # detach paste-window-specific refs so callbacks don't try
-            # to touch destroyed widgets.
+        _closing_flag = {"done": False}
+        def _on_close(from_destroy: bool = False):
+            # Re-entrant guard: <Destroy> AND WM_DELETE_WINDOW can both
+            # fire for the same window; also _toggle_aux_window may have
+            # already called destroy(), after which <Destroy> bubbles
+            # back here. Never call win.destroy() more than once.
+            if _closing_flag["done"]:
+                return
+            _closing_flag["done"] = True
             try:
                 if self._spam.get("win") is win:
                     self._spam["win"] = None
@@ -2358,14 +2482,57 @@ class Overlay:
             self._paste_input = None
             self._paste_send_team = None
             self._paste_send_all = None
-            win.destroy()
-        win.protocol("WM_DELETE_WINDOW", _on_close)
-        win.bind("<Destroy>", lambda e: (_on_close() if e.widget is win else None))
+            if not from_destroy:
+                try: win.destroy()
+                except Exception: pass
+        win.protocol("WM_DELETE_WINDOW", lambda: _on_close(False))
+        win.bind("<Destroy>", lambda e: (_on_close(True) if e.widget is win else None))
 
         # Expose the input + send functions so global hotkeys can use them.
         self._paste_input = txt
         self._paste_send_team = do_send_team
         self._paste_send_all = do_send_all
+
+        # The input was pre-filled from the clipboard earlier. If that
+        # content is non-empty, translate it right away so the user
+        # doesn't have to click Translate — matches "open → see result".
+        # Delay is long enough that the focus-grab dance and first-run
+        # Translator init don't race with us.
+        try:
+            existing = txt.get("1.0", "end").strip()
+            if existing:
+                def _auto_tr(_e=None):
+                    # Only translate if result is still empty — avoids
+                    # re-firing on every Visibility/Map retry after a
+                    # successful translation.
+                    try:
+                        if result_txt.get("1.0", "end").strip():
+                            return
+                    except Exception:
+                        return
+                    try:
+                        status_lbl.config(text="Translating...", fg="#d8c88f")
+                    except Exception: pass
+                    do_translate()
+                    try:
+                        win.after(1800, lambda: status_lbl.config(text=""))
+                    except Exception: pass
+                # Fire immediately (worker runs in a thread, so even if
+                # the focus dance is still in progress, the HTTP call
+                # starts now instead of waiting 500ms of Tk idle).
+                self.root.after(0, _auto_tr)
+                # Backup triggers for the rare case where Tk's after()
+                # is starved while the paste window is trying to take
+                # foreground (Windows deprioritizes background apps'
+                # timers). <Visibility> and <Map> fire as soon as the
+                # window is actually shown, regardless of fg status.
+                win.bind("<Visibility>", _auto_tr, add="+")
+                win.bind("<Map>",        _auto_tr, add="+")
+                # Final safety net: longer delay for first-run Translator
+                # init (import + first HTTP call can take >1s).
+                win.after(1500, _auto_tr)
+        except Exception:
+            pass
 
         # Force focus into the input after the window is fully mapped,
         # so the user can just start typing immediately.  When the
@@ -2375,30 +2542,28 @@ class Overlay:
         # an Alt key press to grant our process the foreground
         # privilege, same trick used by _paste_to_dota_chat.
         def _focus_input():
+            # Keep this LIGHTWEIGHT. A heavy foreground-grab (SetForegroundWindow
+            # + focus_force) while Windows refuses to hand us the fg can stall
+            # Tk's mainloop until an external focus change unblocks it —
+            # showing up as "paste window frozen until I alt-tab to Dota".
+            # deiconify + lift + topmost-pulse is enough for the window to
+            # appear and be clickable. If it isn't keyboard-foreground,
+            # the user can click it to give it focus.
             try:
-                import ctypes as _ct
-                u32 = _ct.windll.user32
-                VK_MENU = 0x12
-                KEYEVENTF_KEYUP = 0x0002
-                # Tap Alt (down+up) — gives us foreground rights.
-                u32.keybd_event(VK_MENU, 0, 0, 0)
-                u32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
                 win.deiconify()
                 win.lift()
                 win.attributes("-topmost", True)
-                win.after(300, lambda: win.attributes("-topmost", False))
-                # Raise our HWND explicitly, then hand focus to the input.
-                try:
-                    hwnd = u32.GetParent(win.winfo_id()) or win.winfo_id()
-                    u32.SetForegroundWindow(hwnd)
-                except Exception:
-                    pass
-                win.focus_force()
+                win.after(200, lambda: _safe_topmost_off())
                 txt.focus_set()
             except Exception:
                 pass
-        win.after(80, _focus_input)
-        win.after(250, _focus_input)
+        def _safe_topmost_off():
+            try:
+                if win.winfo_exists():
+                    win.attributes("-topmost", False)
+            except Exception:
+                pass
+        win.after(50, _focus_input)
 
     # Map readable key names -> Virtual Key codes.
     _CHAT_KEY_VK = {
