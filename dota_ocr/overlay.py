@@ -312,6 +312,9 @@ class Overlay:
         )
         self._paste_btn.pack(side="left", padx=2, pady=2)
         self._paste_window: tk.Toplevel | None = None
+        self._paste_input = None
+        self._paste_send_team = None
+        self._paste_send_all = None
 
         self._settings_btn = tk.Button(
             bar,
@@ -456,6 +459,12 @@ class Overlay:
             5: {"name": "settings", "label": "Settings",
                 "vk": 0x4F, "mods": MOD_CTRL | MOD_SHIFT,   # Ctrl+Shift+O
                 "handler": lambda: self.root.after(0, self._on_settings_click)},
+            6: {"name": "team_send", "label": "Send to team chat",
+                "vk": 0x54, "mods": MOD_CTRL | MOD_SHIFT,   # Ctrl+Shift+T
+                "handler": lambda: self.root.after(0, self._hotkey_send_team)},
+            7: {"name": "all_send", "label": "Send to all chat",
+                "vk": 0x59, "mods": MOD_CTRL | MOD_SHIFT,   # Ctrl+Shift+Y
+                "handler": lambda: self.root.after(0, self._hotkey_send_all)},
         }
         # Load overrides from cfg["hotkeys"] if present.
         stored = (self._cfg or {}).get("hotkeys", {}) if hasattr(self, "_cfg") else {}
@@ -1099,6 +1108,57 @@ class Overlay:
             self.text.insert("end", f"{trans}\n\n", "dst")
         self.text.see("end")
         self.text.configure(state="disabled")
+        # Auto-grow the overlay so at least the last 5 messages fit
+        # without scrolling — crucial while locked (click-through), when
+        # the user can't scroll at all.
+        try:
+            self._autosize_to_messages(visible=5)
+        except Exception:
+            pass
+
+    def _autosize_to_messages(self, visible: int = 5) -> None:
+        """Resize the overlay height so the last `visible` messages
+        are fully on-screen.  Width and X/Y position are preserved."""
+        if not self._messages:
+            return
+        msgs = self._messages[-visible:]
+        # Each message renders as 3 lines (orig + trans + blank).
+        # Use the text widget's actual wrapped-line count for accuracy.
+        try:
+            total_display_lines = int(
+                self.text.count("1.0", "end", "displaylines")[0]
+            )
+        except Exception:
+            total_display_lines = len(msgs) * 3
+
+        # Line height in px from the widget's font.
+        try:
+            font = self.text.cget("font")
+            # tkinter.font.Font supports metrics("linespace")
+            import tkinter.font as tkfont
+            if isinstance(font, str):
+                f = tkfont.nametofont(font) if font in tkfont.names(self.root) else tkfont.Font(root=self.root, font=font)
+            else:
+                f = font
+            line_h = f.metrics("linespace")
+        except Exception:
+            line_h = 16
+
+        bar_h = 34  # top bar height + padding
+        desired = bar_h + total_display_lines * line_h + 8
+        # Clamp: don't make the window absurdly tall.
+        screen_h = self.root.winfo_screenheight()
+        desired = max(90, min(desired, int(screen_h * 0.6)))
+
+        cur_geo = self.root.geometry()  # "WxH+X+Y"
+        try:
+            size, x, y = cur_geo.split("+", 1)[0], *cur_geo.split("+")[1:]
+            w_str, _ = size.split("x")
+            w = int(w_str)
+            x, y = int(x), int(y)
+        except Exception:
+            w, x, y = 640, 50, 50
+        self.root.geometry(f"{w}x{desired}+{x}+{y}")
 
     # ---- paste & copy ----
     @staticmethod
@@ -1108,6 +1168,26 @@ class Overlay:
         lat = sum(1 for c in text if c.isalpha() and not ("\u0400" <= c <= "\u04FF"))
         is_ru = cyr >= 3 and (cyr + lat) > 0 and cyr / (cyr + lat) >= 0.4
         return ("ru", "en") if is_ru else ("en", "ru")
+
+    # ---- Paste-window send hotkeys ----
+    def _hotkey_send_team(self) -> None:
+        if self._paste_send_team is None:
+            # Window isn't open — nothing to send.  Flash a hint.
+            self.set_status("Open Paste first, then send", "#ffa500")
+            return
+        try:
+            self._paste_send_team()
+        except Exception:
+            pass
+
+    def _hotkey_send_all(self) -> None:
+        if self._paste_send_all is None:
+            self.set_status("Open Paste first, then send", "#ffa500")
+            return
+        try:
+            self._paste_send_all()
+        except Exception:
+            pass
 
     # ---- Settings window ----
     def _on_settings_click(self) -> None:
@@ -1270,6 +1350,11 @@ class Overlay:
                     self._paste_window.deiconify()
                     self._paste_window.lift()
                     self._paste_window.focus_force()
+                    try:
+                        if self._paste_input is not None:
+                            self._paste_input.focus_set()
+                    except Exception:
+                        pass
                     return
                 self._paste_window.destroy()
             except Exception:
@@ -1477,9 +1562,52 @@ class Overlay:
         txt.bind("<Control-Return>", lambda e: (do_translate(), win.after(300, do_send_team), "break"))
         txt.bind("<Shift-Return>",   lambda e: (do_translate(), win.after(300, do_send_all),  "break"))
         win.bind("<Escape>", lambda _e: win.destroy())
-        win.protocol("WM_DELETE_WINDOW", lambda: (
-            setattr(self, "_paste_window", None), win.destroy()
-        ))
+        def _on_close():
+            self._paste_window = None
+            self._paste_input = None
+            self._paste_send_team = None
+            self._paste_send_all = None
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+        win.bind("<Destroy>", lambda e: (_on_close() if e.widget is win else None))
+
+        # Expose the input + send functions so global hotkeys can use them.
+        self._paste_input = txt
+        self._paste_send_team = do_send_team
+        self._paste_send_all = do_send_all
+
+        # Force focus into the input after the window is fully mapped,
+        # so the user can just start typing immediately.  When the
+        # Paste window is opened from a global hotkey (Dota is the
+        # foreground app), Windows blocks SetForegroundWindow unless
+        # the calling thread *just* received user input — so we fake
+        # an Alt key press to grant our process the foreground
+        # privilege, same trick used by _paste_to_dota_chat.
+        def _focus_input():
+            try:
+                import ctypes as _ct
+                u32 = _ct.windll.user32
+                VK_MENU = 0x12
+                KEYEVENTF_KEYUP = 0x0002
+                # Tap Alt (down+up) — gives us foreground rights.
+                u32.keybd_event(VK_MENU, 0, 0, 0)
+                u32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+                win.deiconify()
+                win.lift()
+                win.attributes("-topmost", True)
+                win.after(300, lambda: win.attributes("-topmost", False))
+                # Raise our HWND explicitly, then hand focus to the input.
+                try:
+                    hwnd = u32.GetParent(win.winfo_id()) or win.winfo_id()
+                    u32.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+                win.focus_force()
+                txt.focus_set()
+            except Exception:
+                pass
+        win.after(80, _focus_input)
+        win.after(250, _focus_input)
 
     # Map readable key names -> Virtual Key codes.
     _CHAT_KEY_VK = {
