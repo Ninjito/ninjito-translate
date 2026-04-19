@@ -131,6 +131,16 @@ _VK_NAMES = {
 }
 
 
+def _combo_name(vk: int, mods: int) -> str:
+    """Render a (vk, modifier-mask) pair as e.g. 'Ctrl+Shift+L'."""
+    parts = []
+    if mods & 0x0002: parts.append("Ctrl")
+    if mods & 0x0004: parts.append("Shift")
+    if mods & 0x0001: parts.append("Alt")
+    parts.append(_vk_to_name(vk))
+    return "+".join(parts)
+
+
 def _vk_to_name(vk: int) -> str:
     if vk in _VK_NAMES:
         return _VK_NAMES[vk]
@@ -303,6 +313,22 @@ class Overlay:
         self._paste_btn.pack(side="left", padx=2, pady=2)
         self._paste_window: tk.Toplevel | None = None
 
+        self._settings_btn = tk.Button(
+            bar,
+            text="⚙️ Settings",
+            bg="#2a2a2a",
+            fg="#cccccc",
+            activebackground="#3a3a3a",
+            activeforeground="#ffffff",
+            font=("Consolas", 9, "bold"),
+            relief="flat",
+            padx=10,
+            cursor="hand2",
+            command=self._on_settings_click,
+        )
+        self._settings_btn.pack(side="left", padx=2, pady=2)
+        self._settings_window: tk.Toplevel | None = None
+
         self._status = tk.Label(
             bar,
             text=f"Press button or {self._hotkey_name} to translate",
@@ -402,15 +428,53 @@ class Overlay:
         self._closing = False
         self.root.after(120, self._drain)
 
-        # --- Global hotkey (F7) via Windows API ---
-        self._hotkey_vk = hotkey_vk
+        # --- Auto-hide when Dota 2 isn't foreground ---
+        # Poll the foreground window; withdraw the overlay (and any open
+        # aux windows) while the user is in the browser / desktop, and
+        # restore when Dota regains focus.  This runs on the Tk thread.
+        self._auto_hidden = False
+        self.root.after(400, self._tick_foreground_visibility)
+
+        # --- Global hotkeys via Windows API (multi-action) ---
+        # Action map: id -> { "name": label, "vk": int, "mods": int, "handler": cb }
+        # IDs: 1=translate, 2=lock, 3=paste, 4=logs, 5=settings
+        MOD_CTRL = 0x0002
+        MOD_SHIFT = 0x0004
+        self._action_defs = {
+            1: {"name": "translate", "label": "Translate",
+                "vk": hotkey_vk, "mods": 0,
+                "handler": lambda: self._trigger_event.set()},
+            2: {"name": "lock", "label": "Lock/unlock",
+                "vk": 0x4C, "mods": MOD_CTRL | MOD_SHIFT,   # Ctrl+Shift+L
+                "handler": lambda: self.root.after(0, self._on_lock_toggle)},
+            3: {"name": "paste", "label": "Paste window",
+                "vk": 0x50, "mods": MOD_CTRL | MOD_SHIFT,   # Ctrl+Shift+P
+                "handler": lambda: self.root.after(0, self._on_paste_click)},
+            4: {"name": "logs", "label": "Logs window",
+                "vk": 0x48, "mods": MOD_CTRL | MOD_SHIFT,   # Ctrl+Shift+H
+                "handler": lambda: self.root.after(0, self._on_logs_click)},
+            5: {"name": "settings", "label": "Settings",
+                "vk": 0x4F, "mods": MOD_CTRL | MOD_SHIFT,   # Ctrl+Shift+O
+                "handler": lambda: self.root.after(0, self._on_settings_click)},
+        }
+        # Load overrides from cfg["hotkeys"] if present.
+        stored = (self._cfg or {}).get("hotkeys", {}) if hasattr(self, "_cfg") else {}
+        for aid, info in self._action_defs.items():
+            cfg_entry = stored.get(info["name"])
+            if isinstance(cfg_entry, dict):
+                info["vk"] = int(cfg_entry.get("vk", info["vk"]))
+                info["mods"] = int(cfg_entry.get("mods", info["mods"]))
+
+        self._hotkey_vk = self._action_defs[1]["vk"]  # back-compat
+        self._hotkey_name = _combo_name(self._action_defs[1]["vk"], self._action_defs[1]["mods"])
         self._hotkey_thread = threading.Thread(
             target=self._hotkey_listener, daemon=True
         )
         self._hotkey_thread.start()
 
     # ---- hotkey ----
-    _HOTKEY_ID = 1
+    _HOTKEY_ID = 1  # legacy — translate action id
+    _LOCK_HOTKEY_ID = 2
 
     def _hotkey_listener(self) -> None:
         """Register a system-wide hotkey and listen for it.
@@ -422,12 +486,21 @@ class Overlay:
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
             self._hotkey_thread_id = kernel32.GetCurrentThreadId()
-            MOD_NONE = 0
-            current_vk = self._hotkey_vk
-            if not user32.RegisterHotKey(None, self._HOTKEY_ID, MOD_NONE, current_vk):
-                print(f"[overlay] Could not register global hotkey "
-                      f"{_vk_to_name(current_vk)} (may be in use).", flush=True)
-                current_vk = None
+
+            def _register_all():
+                # Unregister any previously-registered ids, then register
+                # the current action definitions.
+                for aid in list(self._action_defs.keys()):
+                    try: user32.UnregisterHotKey(None, aid)
+                    except Exception: pass
+                for aid, info in self._action_defs.items():
+                    ok = user32.RegisterHotKey(None, aid, info["mods"], info["vk"])
+                    if not ok:
+                        print(f"[overlay] Could not bind {info['label']}: "
+                              f"{_combo_name(info['vk'], info['mods'])} "
+                              f"(in use).", flush=True)
+
+            _register_all()
 
             msg = ctypes.wintypes.MSG()
             while not self._closing:
@@ -435,22 +508,22 @@ class Overlay:
                 if ret <= 0:
                     break
                 if msg.message == 0x0312:  # WM_HOTKEY
-                    self._trigger_event.set()
-                elif msg.message == 0x0400:  # WM_USER — rebind request
-                    new_vk = self._hotkey_vk
-                    if current_vk is not None:
-                        user32.UnregisterHotKey(None, self._HOTKEY_ID)
-                    ok = user32.RegisterHotKey(None, self._HOTKEY_ID, MOD_NONE, new_vk)
-                    if ok:
-                        current_vk = new_vk
-                        print(f"[overlay] Hotkey rebound to {_vk_to_name(new_vk)}",
-                              flush=True)
-                    else:
-                        current_vk = None
-                        print(f"[overlay] Failed to bind {_vk_to_name(new_vk)} "
-                              "(in use by another app)", flush=True)
-            if current_vk is not None:
-                user32.UnregisterHotKey(None, self._HOTKEY_ID)
+                    aid = int(msg.wParam)
+                    info = self._action_defs.get(aid)
+                    if info is not None:
+                        try:
+                            info["handler"]()
+                        except Exception:
+                            pass
+                elif msg.message == 0x0400:  # WM_USER — re-register request
+                    _register_all()
+                elif msg.message == 0x0401:  # WM_USER+1 — unregister all
+                    for aid in list(self._action_defs.keys()):
+                        try: user32.UnregisterHotKey(None, aid)
+                        except Exception: pass
+            for aid in list(self._action_defs.keys()):
+                try: user32.UnregisterHotKey(None, aid)
+                except Exception: pass
         except Exception:
             pass
 
@@ -460,6 +533,16 @@ class Overlay:
             tid = getattr(self, "_hotkey_thread_id", None)
             if tid:
                 ctypes.windll.user32.PostThreadMessageW(tid, 0x0400, 0, 0)
+        except Exception:
+            pass
+
+    def _request_hotkey_unregister_all(self) -> None:
+        """Temporarily disable ALL global hotkeys (used while capturing
+        a new combo in Settings, so the existing shortcuts don't fire)."""
+        try:
+            tid = getattr(self, "_hotkey_thread_id", None)
+            if tid:
+                ctypes.windll.user32.PostThreadMessageW(tid, 0x0401, 0, 0)
         except Exception:
             pass
 
@@ -666,7 +749,7 @@ class Overlay:
         self._closing = True
         # Close any auxiliary windows (logs, paste) so they don't linger
         # as orphan Toplevels after the main overlay is destroyed.
-        for attr in ("_logs_window", "_paste_window"):
+        for attr in ("_logs_window", "_paste_window", "_settings_window"):
             w = getattr(self, attr, None)
             if w is not None:
                 try:
@@ -709,35 +792,111 @@ class Overlay:
             # Make the window non-focusable (WS_EX_NOACTIVATE) so clicking
             # on it never steals focus from Dota 2.
             self._apply_noactivate(True)
-            self.set_status("Locked (drag disabled)", "#7bd88f")
+            self.set_status("Locked — clicks pass through. Ctrl+Shift+L to unlock", "#7bd88f")
         else:
             self._lock_btn.configure(text="🔓 Unlocked", bg="#2a1a1a", fg="#d88f8f")
             self.text.configure(cursor="fleur")
             self._apply_noactivate(False)
             self.set_status("Unlocked", "#888")
 
-    def _apply_noactivate(self, enable: bool) -> None:
-        """Toggle WS_EX_NOACTIVATE on the overlay window via Win32.
+    def _tick_foreground_visibility(self) -> None:
+        """Hide the overlay while Dota 2 is not in the foreground.
 
-        When enabled, clicking the window doesn't make it the foreground
-        window — focus stays on Dota 2.  Mouse wheel / buttons still
-        work, just no focus stealing.
+        Considers Dota foreground = Dota itself OR our own overlay / its
+        aux windows (so clicking the Paste window doesn't hide the app).
+        """
+        if self._closing:
+            return
+        try:
+            from dota_ocr.window import find_dota_hwnd
+            user32 = ctypes.windll.user32
+            user32.GetForegroundWindow.restype = ctypes.c_void_p
+            fg = user32.GetForegroundWindow() or 0
+
+            # Collect our own top-level HWNDs (main + toplevels).
+            own_hwnds = set()
+            try:
+                GA_ROOT = 2
+                user32.GetAncestor.restype = ctypes.c_void_p
+                user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+                for w in (self.root, self._logs_window, self._paste_window, self._settings_window):
+                    if w is None:
+                        continue
+                    try:
+                        if hasattr(w, "winfo_exists") and not w.winfo_exists():
+                            continue
+                        h = int(w.winfo_id())
+                        own_hwnds.add(user32.GetAncestor(h, GA_ROOT) or h)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            dota_hwnd = find_dota_hwnd()
+            is_dota_fg = bool(dota_hwnd and fg == dota_hwnd)
+            is_ours_fg = fg in own_hwnds
+            should_show = is_dota_fg or is_ours_fg
+
+            if should_show and self._auto_hidden:
+                try:
+                    self.root.deiconify()
+                except Exception:
+                    pass
+                for w in (self._logs_window, self._paste_window, self._settings_window):
+                    try:
+                        if w is not None and w.winfo_exists():
+                            w.deiconify()
+                    except Exception:
+                        pass
+                self._auto_hidden = False
+            elif not should_show and not self._auto_hidden:
+                try:
+                    self.root.withdraw()
+                except Exception:
+                    pass
+                for w in (self._logs_window, self._paste_window, self._settings_window):
+                    try:
+                        if w is not None and w.winfo_exists():
+                            w.withdraw()
+                    except Exception:
+                        pass
+                self._auto_hidden = True
+        except Exception:
+            pass
+        # Re-schedule.
+        try:
+            self.root.after(400, self._tick_foreground_visibility)
+        except Exception:
+            pass
+
+    def _apply_noactivate(self, enable: bool) -> None:
+        """Toggle WS_EX_NOACTIVATE + WS_EX_TRANSPARENT on the overlay.
+
+        When enabled:
+          * WS_EX_NOACTIVATE  -> clicking doesn't steal focus from Dota.
+          * WS_EX_TRANSPARENT -> mouse clicks pass THROUGH the overlay to
+            the window beneath (Dota), so hovering/clicking on the
+            overlay behaves exactly like clicking the game underneath.
+        When disabled, the overlay becomes clickable again so you can
+        use the toolbar buttons, drag, etc.
         """
         try:
             import ctypes
             GWL_EXSTYLE = -20
             WS_EX_NOACTIVATE = 0x08000000
+            WS_EX_TRANSPARENT = 0x00000020
+            WS_EX_LAYERED = 0x00080000
             hwnd = self.root.winfo_id()
-            # Walk up to the top-level HWND (Tk's winfo_id is the inner
-            # canvas/frame). Use GetAncestor(GA_ROOT).
             GA_ROOT = 2
             user32 = ctypes.windll.user32
             hwnd = user32.GetAncestor(hwnd, GA_ROOT) or hwnd
             style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             if enable:
-                style |= WS_EX_NOACTIVATE
+                # WS_EX_TRANSPARENT requires WS_EX_LAYERED; Tk alpha
+                # already sets LAYERED but we OR it in defensively.
+                style |= WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED
             else:
-                style &= ~WS_EX_NOACTIVATE
+                style &= ~(WS_EX_NOACTIVATE | WS_EX_TRANSPARENT)
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
         except Exception:
             pass
@@ -779,15 +938,14 @@ class Overlay:
 
     # ---- logs window ----
     def _on_logs_click(self) -> None:
-        # Focus existing window if already open.
+        # Toggle: if already open, close it.
         if self._logs_window is not None and self._logs_window.winfo_exists():
             try:
-                self._logs_window.lift()
-                self._logs_window.focus_force()
-                self._refresh_logs_text()
-                return
+                self._logs_window.destroy()
             except Exception:
-                self._logs_window = None
+                pass
+            self._logs_window = None
+            return
 
         from . import history
 
@@ -951,23 +1109,173 @@ class Overlay:
         is_ru = cyr >= 3 and (cyr + lat) > 0 and cyr / (cyr + lat) >= 0.4
         return ("ru", "en") if is_ru else ("en", "ru")
 
+    # ---- Settings window ----
+    def _on_settings_click(self) -> None:
+        # Toggle: if already open, close it.
+        if self._settings_window is not None and self._settings_window.winfo_exists():
+            try:
+                self._settings_window.destroy()
+            except Exception:
+                pass
+            self._settings_window = None
+            return
+
+        win = tk.Toplevel(self.root)
+        self._settings_window = win
+        win.title("Settings — Hotkeys")
+        _set_dark_titlebar(win)
+        try:
+            if self._brand_icon is not None:
+                win.iconphoto(False, self._brand_icon)
+            ico = _resource_path("gg.ico")
+            if os.path.isfile(ico):
+                win.iconbitmap(ico)
+        except Exception:
+            pass
+        win.configure(bg="#0a0a0a")
+        win.geometry("440x300")
+
+        tk.Label(win, text="Click a hotkey to rebind it.",
+                 bg="#0a0a0a", fg="#bbbbbb",
+                 font=("Consolas", 9)).pack(anchor="w", padx=10, pady=(10, 4))
+
+        rows = tk.Frame(win, bg="#0a0a0a")
+        rows.pack(fill="both", expand=True, padx=10, pady=4)
+
+        row_widgets: dict[int, tk.Button] = {}
+
+        def _refresh_row(aid):
+            info = self._action_defs[aid]
+            row_widgets[aid].configure(
+                text=_combo_name(info["vk"], info["mods"])
+            )
+
+        def _start_capture(aid):
+            info = self._action_defs[aid]
+            btn = row_widgets[aid]
+            btn.configure(text="Press keys...  (Esc = cancel)", bg="#5a2a2a")
+            # Disable ALL global hotkeys while capturing so typing e.g.
+            # Ctrl+Shift+P here doesn't toggle the Paste window.
+            self._request_hotkey_unregister_all()
+
+            def capture(event: tk.Event):
+                keysym = event.keysym
+                if keysym == "Escape":
+                    _refresh_row(aid)
+                    btn.configure(bg="#2a2a1a")
+                    win.unbind("<Key>", bid)
+                    # Restore the previous hotkeys.
+                    self._request_hotkey_reregister()
+                    return "break"
+                # Ignore pure modifier keys.
+                if keysym in ("Control_L", "Control_R", "Shift_L",
+                              "Shift_R", "Alt_L", "Alt_R"):
+                    return "break"
+                vk = _KEYSYM_TO_VK.get(keysym)
+                if vk is None and len(keysym) == 1 and keysym.isalnum():
+                    vk = ord(keysym.upper())
+                if vk is None:
+                    btn.configure(text=f"Unsupported ({keysym})", bg="#5a2a2a")
+                    return "break"
+                mods = 0
+                if event.state & 0x0004: mods |= 0x0002  # Ctrl
+                if event.state & 0x0001: mods |= 0x0004  # Shift
+                if event.state & 0x20000: mods |= 0x0001  # Alt
+                # Commit
+                info["vk"] = vk
+                info["mods"] = mods
+                _refresh_row(aid)
+                btn.configure(bg="#2a2a1a")
+                win.unbind("<Key>", bid)
+                # Re-register all with Windows.
+                self._request_hotkey_reregister()
+                # Persist to config.json.
+                self._persist_hotkeys()
+                # Keep the legacy translate fields in sync.
+                if aid == 1:
+                    self._hotkey_vk = vk
+                    self._hotkey_name = _combo_name(vk, mods)
+                    self._hotkey_btn.configure(text=f"🎹 {self._hotkey_name}")
+                    self._status.configure(
+                        text=f"Press button or {self._hotkey_name} to translate",
+                        fg="#555",
+                    )
+                return "break"
+
+            bid = win.bind("<Key>", capture)
+
+        for aid, info in self._action_defs.items():
+            row = tk.Frame(rows, bg="#0a0a0a")
+            row.pack(fill="x", pady=3)
+            tk.Label(row, text=info["label"] + ":",
+                     bg="#0a0a0a", fg="#e0e0e0",
+                     font=("Consolas", 10), width=16, anchor="w"
+                     ).pack(side="left")
+            btn = tk.Button(
+                row, text=_combo_name(info["vk"], info["mods"]),
+                bg="#2a2a1a", fg="#d8d88f",
+                activebackground="#3a3a2a", activeforeground="#ffffaa",
+                font=("Consolas", 10, "bold"),
+                relief="flat", padx=10, cursor="hand2",
+                command=lambda a=aid: _start_capture(a),
+            )
+            btn.pack(side="left", padx=6)
+            row_widgets[aid] = btn
+
+        tk.Label(
+            win,
+            text="Tip: combos like Ctrl+Shift+L work globally, while\n"
+                 "F-keys alone avoid conflicting with other apps.",
+            bg="#0a0a0a", fg="#777",
+            font=("Consolas", 8), justify="left"
+        ).pack(anchor="w", padx=10, pady=(8, 10))
+
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.protocol("WM_DELETE_WINDOW", lambda: (
+            setattr(self, "_settings_window", None), win.destroy()
+        ))
+
+    def _persist_hotkeys(self) -> None:
+        """Write current action hotkeys to config.json under 'hotkeys'."""
+        try:
+            import json
+            cfg_path = Path(_resource_path("config.json"))
+            # Prefer the real config.json next to the exe / project root.
+            here = Path(__file__).resolve().parent.parent
+            candidate = here / "config.json"
+            if candidate.is_file():
+                cfg_path = candidate
+            elif getattr(sys, "frozen", False):
+                alt = Path(sys.executable).parent / "config.json"
+                if alt.is_file():
+                    cfg_path = alt
+            if not cfg_path.is_file():
+                return
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            hk = data.setdefault("hotkeys", {})
+            for info in self._action_defs.values():
+                hk[info["name"]] = {"vk": info["vk"], "mods": info["mods"]}
+            cfg_path.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            print(f"[settings] persist failed: {e}", flush=True)
+
     def _on_paste_click(self) -> None:
         if self._paste_window is not None and self._paste_window.winfo_exists():
             try:
-                # Restore if minimized / withdrawn, then bring to front.
-                try:
-                    if self._paste_window.state() in ("iconic", "withdrawn"):
-                        self._paste_window.deiconify()
-                except Exception:
-                    pass
-                self._paste_window.deiconify()
-                self._paste_window.lift()
-                self._paste_window.attributes("-topmost", True)
-                self._paste_window.after(200, lambda: self._paste_window.attributes("-topmost", False))
-                self._paste_window.focus_force()
-                return
+                # Toggle close — or restore if currently minimized.
+                if self._paste_window.state() in ("iconic", "withdrawn"):
+                    self._paste_window.deiconify()
+                    self._paste_window.lift()
+                    self._paste_window.focus_force()
+                    return
+                self._paste_window.destroy()
             except Exception:
-                self._paste_window = None
+                pass
+            self._paste_window = None
+            return
 
         win = tk.Toplevel(self.root)
         self._paste_window = win

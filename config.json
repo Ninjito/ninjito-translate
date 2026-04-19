@@ -22,5 +22,27 @@
     "alpha": 0.55,
     "max_messages": 5,
     "hotkey_vk": 117
+  },
+  "hotkeys": {
+    "translate": {
+      "vk": 118,
+      "mods": 0
+    },
+    "lock": {
+      "vk": 76,
+      "mods": 6
+    },
+    "paste": {
+      "vk": 80,
+      "mods": 6
+    },
+    "logs": {
+      "vk": 72,
+      "mods": 6
+    },
+    "settings": {
+      "vk": 77,
+      "mods": 6
+    }
   }
 }
