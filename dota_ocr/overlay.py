@@ -244,7 +244,7 @@ class Overlay:
         self._hotkey_name = _vk_to_name(hotkey_vk)
 
         self.root = tk.Tk()
-        self.root.title("Dota 2 Translate")
+        self.root.title("Ninjito Translate")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", self._alpha)

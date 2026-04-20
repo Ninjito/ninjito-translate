@@ -43,7 +43,7 @@ if _sys.platform == "win32":
     try:
         import ctypes as _ct
         _ct.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "Ninja.Dota2Translate.1"
+            "Ninjito.Translate.1"
         )
     except Exception:
         pass
@@ -58,7 +58,7 @@ if _sys.platform == "win32":
         _k32 = _ct.windll.kernel32
         _u32 = _ct.windll.user32
         _ERROR_ALREADY_EXISTS = 183
-        _MUTEX_NAME = "Global\\Dota2Translate_SingleInstance_Mutex"
+        _MUTEX_NAME = "Global\\NinjitoTranslate_SingleInstance_Mutex"
         _k32.CreateMutexW.argtypes = [_wt.LPVOID, _wt.BOOL, _wt.LPCWSTR]
         _k32.CreateMutexW.restype = _wt.HANDLE
         _mutex = _k32.CreateMutexW(None, True, _MUTEX_NAME)
@@ -67,7 +67,7 @@ if _sys.platform == "win32":
             try:
                 _u32.FindWindowW.argtypes = [_wt.LPCWSTR, _wt.LPCWSTR]
                 _u32.FindWindowW.restype = _wt.HWND
-                hwnd = _u32.FindWindowW(None, "Dota 2 Translate")
+                hwnd = _u32.FindWindowW(None, "Ninjito Translate")
                 if hwnd:
                     _u32.ShowWindow(hwnd, 9)   # SW_RESTORE
                     _u32.SetForegroundWindow(hwnd)

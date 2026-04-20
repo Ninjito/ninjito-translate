@@ -1,7 +1,7 @@
 """Build a portable distribution of Dota 2 Translate.
 
-Produces `dist/Dota2Translate/` which contains:
-    - Dota2Translate.exe            (the app, no Python needed)
+Produces `dist/NinjitoTranslate/` which contains:
+    - NinjitoTranslate.exe          (the app, no Python needed)
     - Tesseract-OCR/                (bundled OCR engine)
     - config.json                   (editable settings)
     - _internal/                    (Python libs — leave alone)
@@ -20,7 +20,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
-APP_NAME = "Dota2Translate"
+APP_NAME = "NinjitoTranslate"
+APP_TITLE = "Ninjito Translate"
+SPEC_CANDIDATES = [
+    ROOT / f"{APP_NAME}.spec",
+    ROOT / "Dota2Translate.spec",
+]
 
 # Paths where Tesseract might live on the build machine.
 TESS_CANDIDATES = [
@@ -41,7 +46,7 @@ def find_tesseract_dir() -> Path:
 
 
 def _kill_running_app() -> None:
-    """Kill any running Dota2Translate.exe so we can overwrite its files."""
+    """Kill any running NinjitoTranslate.exe so we can overwrite its files."""
     try:
         subprocess.run(
             ["taskkill", "/F", "/IM", f"{APP_NAME}.exe", "/T"],
@@ -73,8 +78,8 @@ def clean() -> None:
 
 
 def run_pyinstaller() -> None:
-    spec = ROOT / f"{APP_NAME}.spec"
-    if spec.exists():
+    spec = next((p for p in SPEC_CANDIDATES if p.exists()), None)
+    if spec is not None and spec.exists():
         # Build from spec so icon + datas (gg.png / gg.ico) are honored.
         cmd = [
             sys.executable, "-m", "PyInstaller",
@@ -137,11 +142,12 @@ def copy_config() -> None:
 def write_readme() -> None:
     readme = DIST / APP_NAME / "README.txt"
     readme.write_text(
-        "Dota 2 Russian -> English Chat Translator\n"
-        "==========================================\n\n"
+        f"{APP_TITLE}\n"
+        "==================\n\n"
+        "Dota 2 Russian -> English Chat Translator\n\n"
         "HOW TO USE:\n"
         "  1. Launch Dota 2 and enter any game (demo / lobby / real match).\n"
-        "  2. Double-click Dota2Translate.exe.\n"
+        f"  2. Double-click {APP_NAME}.exe.\n"
         "  3. Click the 'Resize' button to draw a box around the chat area.\n"
         "  4. Press F8 (or the Translate button) whenever you want to\n"
         "     translate the Russian chat currently visible on screen.\n\n"
@@ -170,7 +176,7 @@ def main() -> None:
     final = DIST / APP_NAME
     print(f"\n[build] DONE.  Portable app at: {final}")
     print(f"[build] Zip that folder and send it to your friends.")
-    print(f"[build] They just extract and run Dota2Translate.exe.")
+    print(f"[build] They just extract and run {APP_NAME}.exe.")
 
 
 if __name__ == "__main__":
