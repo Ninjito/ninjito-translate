@@ -1205,31 +1205,14 @@ class Overlay:
             # Clear _auto_hidden so the foreground ticker doesn't
             # immediately re-withdraw us while Dota is still fg.
             self._auto_hidden = False
+
+            # Deiconify + lift immediately on Tk thread (fast, no stall).
             try:
-                # Alt-tap: grants our process foreground privilege so
-                # SetForegroundWindow succeeds when invoked from a
-                # global hotkey while Dota is the fg window.
-                try:
-                    import ctypes as _ct
-                    u32 = _ct.windll.user32
-                    u32.keybd_event(0x12, 0, 0, 0)         # Alt down
-                    u32.keybd_event(0x12, 0, 0x0002, 0)    # Alt up
-                except Exception:
-                    pass
                 w.deiconify()
                 w.lift()
                 try: w.attributes("-topmost", True)
                 except Exception: pass
-                try:
-                    import ctypes as _ct
-                    u32 = _ct.windll.user32
-                    hwnd = u32.GetParent(w.winfo_id()) or w.winfo_id()
-                    u32.SetForegroundWindow(hwnd)
-                except Exception:
-                    pass
-                w.focus_force()
-                # Also restore siblings so the whole UI comes back
-                # together, matching the tick's behaviour.
+                # Restore siblings too so the whole UI comes back together.
                 try: self.root.deiconify()
                 except Exception: pass
                 for sib in (self._logs_window, self._paste_window,
@@ -1246,6 +1229,36 @@ class Overlay:
                 except Exception: pass
                 setattr(self, attr_name, None)
                 return False
+
+            # Win32 foreground grab runs off-thread so Tk mainloop keeps
+            # pumping — SetForegroundWindow / focus_force can stall the
+            # main thread if Windows refuses to yield focus (e.g. Dota
+            # is still the fg app), which would freeze all hotkey handling.
+            def _grab(wref=w):
+                try:
+                    import ctypes as _ct
+                    u32 = _ct.windll.user32
+                    u32.keybd_event(0x12, 0, 0, 0)       # Alt down
+                    u32.keybd_event(0x12, 0, 0x0002, 0)  # Alt up
+                    try:
+                        hwnd = u32.GetParent(wref.winfo_id()) or wref.winfo_id()
+                        u32.SetForegroundWindow(hwnd)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                try:
+                    self.root.after(0, lambda: _finish(wref))
+                except Exception:
+                    pass
+            def _finish(wref=w):
+                try:
+                    if wref.winfo_exists():
+                        wref.focus_force()
+                        wref.attributes("-topmost", False)
+                except Exception:
+                    pass
+            threading.Thread(target=_grab, daemon=True).start()
             return True
         # Normal visible toggle → close.
         try: w.destroy()
@@ -1346,10 +1359,43 @@ class Overlay:
         self._logs_text = txt
         self._logs_count = count_lbl
 
-        win.bind("<Escape>", lambda _e: win.destroy())
-        win.protocol("WM_DELETE_WINDOW", lambda: (
-            setattr(self, "_logs_window", None), win.destroy()
-        ))
+        _l_closing = {"done": False}
+        def _logs_close(from_destroy: bool = False):
+            if _l_closing["done"]:
+                return
+            _l_closing["done"] = True
+            self._logs_window = None
+            if not from_destroy:
+                try: win.destroy()
+                except Exception: pass
+        win.bind("<Escape>",  lambda _e: _logs_close(False))
+        win.bind("<Destroy>", lambda e: (_logs_close(True) if e.widget is win else None))
+        win.protocol("WM_DELETE_WINDOW", lambda: _logs_close(False))
+
+        # Foreground grab off-thread (same pattern as paste/settings).
+        def _logs_grab():
+            try:
+                import ctypes as _ct
+                u32 = _ct.windll.user32
+                u32.keybd_event(0x12, 0, 0, 0)
+                u32.keybd_event(0x12, 0, 0x0002, 0)
+                try:
+                    hwnd = u32.GetParent(win.winfo_id()) or win.winfo_id()
+                    u32.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            try:
+                self.root.after(0, lambda: (
+                    win.lift(), win.focus_force(),
+                    win.after(300, lambda: win.attributes("-topmost", False)
+                              if win.winfo_exists() else None)
+                ) if win.winfo_exists() else None)
+            except Exception:
+                pass
+        win.after(50, lambda: threading.Thread(
+            target=_logs_grab, daemon=True).start())
 
         self._refresh_logs_text()
 
@@ -1586,6 +1632,8 @@ class Overlay:
             pass
         win.configure(bg="#0a0a0a")
         win.geometry(f"{_sz.SETTINGS_WIDTH}x{_sz.SETTINGS_HEIGHT}")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)   # float above Dota on open
 
         # ── Tabs ──────────────────────────────────────────────────────
         style = ttk.Style(win)
@@ -1784,19 +1832,60 @@ class Overlay:
             r.pack(fill="x", padx=12, pady=2)
             tk.Radiobutton(
                 r, text=label, variable=theme_var, value=val,
-                bg="#0a0a0a", fg="#e0e0e0", selectcolor="#2a2a1a",
+                bg="#0a0a0a", fg="#e0e0e0",
+                selectcolor="#ffd84a",          # filled dot colour when selected
                 activebackground="#0a0a0a", activeforeground="#ffd84a",
                 font=("Consolas", 10, "bold"), borderwidth=0, width=12, anchor="w",
+                indicatoron=True,
                 command=lambda v=val: (self._set_cfg("theme", v),
                                        self._apply_theme(v)),
             ).pack(side="left")
             tk.Label(r, text=desc, bg="#0a0a0a", fg="#777",
                      font=("Consolas", 8)).pack(side="left", padx=6)
 
-        win.bind("<Escape>", lambda _e: win.destroy())
-        win.protocol("WM_DELETE_WINDOW", lambda: (
-            setattr(self, "_settings_window", None), win.destroy()
-        ))
+        _s_closing = {"done": False}
+        def _settings_close(from_destroy: bool = False):
+            if _s_closing["done"]:
+                return
+            _s_closing["done"] = True
+            self._settings_window = None
+            if not from_destroy:
+                try: win.destroy()
+                except Exception: pass
+        win.bind("<Escape>",  lambda _e: _settings_close(False))
+        win.bind("<Destroy>", lambda e: (_settings_close(True) if e.widget is win else None))
+        win.protocol("WM_DELETE_WINDOW", lambda: _settings_close(False))
+
+        # Bring the window to the foreground without stalling the Tk
+        # mainloop (same pattern used by the Paste window).
+        def _settings_grab():
+            try:
+                import ctypes as _ct
+                u32 = _ct.windll.user32
+                u32.keybd_event(0x12, 0, 0, 0)       # Alt down
+                u32.keybd_event(0x12, 0, 0x0002, 0)  # Alt up
+                try:
+                    hwnd = u32.GetParent(win.winfo_id()) or win.winfo_id()
+                    u32.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            try:
+                self.root.after(0, lambda: _settings_finish())
+            except Exception:
+                pass
+        def _settings_finish():
+            try:
+                if win.winfo_exists():
+                    win.lift()
+                    win.focus_force()
+                    win.after(300, lambda: win.attributes("-topmost", False)
+                              if win.winfo_exists() else None)
+            except Exception:
+                pass
+        win.after(50, lambda: threading.Thread(
+            target=_settings_grab, daemon=True).start())
 
     def _bootstrap_defaults(self) -> None:
         """Make sure every setting the app reads has a value in cfg +
@@ -2541,28 +2630,67 @@ class Overlay:
         # the calling thread *just* received user input — so we fake
         # an Alt key press to grant our process the foreground
         # privilege, same trick used by _paste_to_dota_chat.
-        def _focus_input():
-            # Keep this LIGHTWEIGHT. A heavy foreground-grab (SetForegroundWindow
-            # + focus_force) while Windows refuses to hand us the fg can stall
-            # Tk's mainloop until an external focus change unblocks it —
-            # showing up as "paste window frozen until I alt-tab to Dota".
-            # deiconify + lift + topmost-pulse is enough for the window to
-            # appear and be clickable. If it isn't keyboard-foreground,
-            # the user can click it to give it focus.
-            try:
-                win.deiconify()
-                win.lift()
-                win.attributes("-topmost", True)
-                win.after(200, lambda: _safe_topmost_off())
-                txt.focus_set()
-            except Exception:
-                pass
         def _safe_topmost_off():
             try:
                 if win.winfo_exists():
                     win.attributes("-topmost", False)
             except Exception:
                 pass
+
+        def _focus_input():
+            """Bring the paste window to the foreground without blocking Tk.
+
+            The Win32 foreground-grab (Alt-tap + SetForegroundWindow) runs in
+            a worker thread so Tk's mainloop keeps pumping timers and events.
+            Once the thread succeeds (or gives up), it schedules focus_set
+            back on the Tk thread via root.after().
+            """
+            def _win32_grab():
+                try:
+                    import ctypes as _ct
+                    u32 = _ct.windll.user32
+                    # Alt-tap: hands our process the "foreground lock"
+                    # so SetForegroundWindow actually works from a
+                    # background process (Dota is currently fg).
+                    u32.keybd_event(0x12, 0, 0, 0)       # Alt down
+                    u32.keybd_event(0x12, 0, 0x0002, 0)  # Alt up
+                    try:
+                        hwnd = u32.GetParent(win.winfo_id()) or win.winfo_id()
+                        u32.SetForegroundWindow(hwnd)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                # Schedule the Tk-side focus work back on the main thread.
+                try:
+                    self.root.after(0, _tk_focus)
+                except Exception:
+                    pass
+
+            def _tk_focus():
+                try:
+                    if not win.winfo_exists():
+                        return
+                    win.deiconify()
+                    win.lift()
+                    win.attributes("-topmost", True)
+                    win.after(300, _safe_topmost_off)
+                    win.focus_force()
+                    txt.focus_set()
+                except Exception:
+                    pass
+
+            # deiconify immediately so the window is visible,
+            # then grab foreground in a thread.
+            try:
+                win.deiconify()
+                win.lift()
+                win.attributes("-topmost", True)
+                win.after(300, _safe_topmost_off)
+            except Exception:
+                pass
+            threading.Thread(target=_win32_grab, daemon=True).start()
+
         win.after(50, _focus_input)
 
     # Map readable key names -> Virtual Key codes.
@@ -2662,6 +2790,12 @@ class Overlay:
                     return
 
                 # ── 4) open chat ──────────────────────────────────────────────
+                # Press Escape first to close chat if the user already had it
+                # open — otherwise our Enter would toggle it closed instead of
+                # opening it, and the message would never send.
+                VK_ESCAPE = 0x1B
+                _kd(VK_ESCAPE); time.sleep(0.05); _ku(VK_ESCAPE)
+                time.sleep(0.15)
                 # Team:  Enter    |   All: Shift+Enter
                 if all_chat:
                     _kd(VK_SHIFT)
