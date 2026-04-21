@@ -243,7 +243,7 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
             for text, _ in lines:
                 norm = normalize_colons(text)
                 cyr = has_cyrillic(norm)
-                tag = "TRANSLATE" if cyr else "skip-en"
+                tag = "ru→en" if cyr else "en→ru"
                 print(f"  [{tag}] {text!r}", flush=True)
 
         # --- Merge OCR fragments back into full chat lines ---
@@ -253,7 +253,15 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
         # Rebuild chat lines by gluing [Tag] + (optional middle) + : body.
         merged: list[tuple[str, float]] = []
         i = 0
-        raw = [(t, c) for t, c in lines if t.strip()]
+        # Pre-normalize each fragment's colon-lookalikes (';', '{', '}', '&')
+        # so merge-logic's ':' checks work on OCR variants like
+        # '[Allies] Name ; body'. Otherwise we'd wrongly treat that
+        # fragment as "no colon" and glue it to the NEXT line.
+        raw = [
+            (normalize_colons(t), c)
+            for t, c in lines
+            if t.strip()
+        ]
         while i < len(raw):
             text, conf = raw[i]
             t = text.strip()
@@ -313,15 +321,12 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
             # This rejects HUD garbage (hero stats, ability tooltips,
             # scoreboard columns) that happens to contain Cyrillic.
             if not is_chat_line(text):
-                if debug:
-                    print(f"[skip-notchat] {text!r}", flush=True)
+                print(f"[skip-notchat] {text!r}", flush=True)
                 continue
 
-            # Only translate if it has Russian (Cyrillic) characters.
-            if not has_cyrillic(text):
-                if debug:
-                    print(f"[skip-en] {text!r}", flush=True)
-                continue
+            # Both directions: Russian → English AND English → Russian.
+            # has_cyrillic() is still used for language detection below;
+            # we no longer block pure-Latin (English enemy) chat here.
 
             # Extra junk guard: a "word" is a run of letters.  Real chat
             # messages have most of their words at length >=2 and mostly
@@ -338,8 +343,7 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
                 )
                 # >40% single-char tokens OR >40% mid-word-caps ⇒ junk.
                 if short / len(words) > 0.4 or mixed_case / len(words) > 0.4:
-                    if debug:
-                        print(f"[skip-junk] {text!r}", flush=True)
+                    print(f"[skip-junk] {text!r} words={words}", flush=True)
                     continue
 
             # Skip obvious system messages (no player typed these).
@@ -350,8 +354,7 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
                 "glyph of fortification",
             )
             if any(k in lower for k in system_keywords):
-                if debug:
-                    print(f"[skip-sys] {text!r}", flush=True)
+                print(f"[skip-sys] {text!r}", flush=True)
                 continue
 
             # Extract the message body: everything after the first ':'.
@@ -388,12 +391,12 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
                 src_norm = to_translate.strip().lower()
                 dst_norm = translated.strip().lower()
                 if dst_norm == src_norm:
-                    if debug:
-                        print(f"[skip-echo] {to_translate!r}", flush=True)
+                    print(f"[skip-echo] src={src} {to_translate!r} -> {translated!r}", flush=True)
                     continue
-                if any("\u0400" <= c <= "\u04FF" for c in translated):
-                    if debug:
-                        print(f"[skip-ru-out] {translated!r}", flush=True)
+                # For RU→EN translation the output must be Latin (no Cyrillic).
+                # For EN→RU translation Cyrillic output is expected — don't skip.
+                if src == "ru" and any("\u0400" <= c <= "\u04FF" for c in translated):
+                    print(f"[skip-ru-out] {translated!r}", flush=True)
                     continue
 
                 display_src = f"{prefix} {body}" if (prefix and body) else text
@@ -403,8 +406,7 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
                 history.append(display_src, display_dst)
                 translated_count += 1
             except Exception as e:
-                if debug:
-                    print(f"[trans] error on {text!r}: {e}", flush=True)
+                print(f"[trans] error on {text!r}: {e}", flush=True)
 
         if translated_count > 0:
             overlay.set_status(f"Translated {translated_count} line(s)", "#7bd88f")
@@ -414,7 +416,7 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
                 # Leave attempt_num > 0 so next iteration retries immediately.
                 overlay.set_status(f"Reading... ({attempt_num}/{MAX_ATTEMPTS})", "#ffa500")
             else:
-                overlay.set_status("No Russian text found", "#888")
+                overlay.set_status("No translatable chat found", "#888")
                 attempt_num = 0
       except Exception:
         # Any unhandled error in this iteration: log it, show status,

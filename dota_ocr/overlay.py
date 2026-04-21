@@ -610,6 +610,17 @@ class Overlay:
         )
         self._hotkey_thread.start()
 
+        # Hotkeys are registered system-wide by RegisterHotKey, which
+        # means Windows eats the combo *before* any other app sees it.
+        # To stop us from hijacking Ctrl+Shift+T in Brave etc., we
+        # dynamically unregister when the foreground app is not Dota
+        # (or one of our own windows) and re-register when it is.
+        self._hotkeys_active = True
+        try:
+            self.root.after(300, self._poll_hotkey_gate)
+        except Exception:
+            pass
+
         # --- First-run bootstrap -------------------------------------------
         # On the very first launch the user's config.json has no "hotkeys"
         # dict and may be missing auto-mode/theme keys.  Write the current
@@ -678,6 +689,39 @@ class Overlay:
                     aid = int(msg.wParam)
                     info = self._action_defs.get(aid)
                     if info is not None:
+                        # ── Dota-or-our-app gate ──────────────────────────
+                        # Only fire when Dota 2 OR one of our own windows is
+                        # the foreground app.  This prevents hotkeys like
+                        # Ctrl+Shift+T / Ctrl+Shift+P from hijacking Chrome
+                        # or any other app the user is in.
+                        try:
+                            _fg = user32.GetForegroundWindow() or 0
+                            _relevant = False
+                            # Check our own windows first (fast path).
+                            GA_ROOT = 2
+                            user32.GetAncestor.restype = ctypes.c_void_p
+                            user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+                            for _w in (self.root, self._logs_window,
+                                       self._paste_window, self._settings_window):
+                                if _w is None:
+                                    continue
+                                try:
+                                    _h = int(_w.winfo_id())
+                                    if (user32.GetAncestor(_h, GA_ROOT) or _h) == _fg:
+                                        _relevant = True
+                                        break
+                                except Exception:
+                                    pass
+                            if not _relevant:
+                                # Check if Dota 2 is fg.
+                                from dota_ocr.window import find_dota_hwnd as _fdh
+                                _dota = _fdh()
+                                if _dota and _fg == _dota:
+                                    _relevant = True
+                            if not _relevant:
+                                continue  # drop — user is in another app
+                        except Exception:
+                            pass  # if check fails, allow through
                         # Source-level per-action cooldown: drops WM_HOTKEY
                         # auto-repeat AND rapid mashing that would otherwise
                         # queue up N callbacks on Tk's after() queue and fire
@@ -742,6 +786,65 @@ class Overlay:
                 ctypes.windll.user32.PostThreadMessageW(tid, 0x0401, 0, 0)
         except Exception:
             pass
+
+    def _poll_hotkey_gate(self) -> None:
+        """Register/unregister global hotkeys based on foreground window.
+
+        Runs on the Tk thread every ~250ms. If Dota or one of our own
+        windows is foreground we keep hotkeys registered; otherwise we
+        unregister them so Brave/Chrome/etc receive their native combos
+        (Ctrl+Shift+T to reopen tab, etc.).
+
+        While the user is rebinding a hotkey we suspend gating so we
+        don't fight with the Settings capture path.
+        """
+        try:
+            if getattr(self, "_closing", False):
+                return
+            if getattr(self, "_rebinding", False):
+                # Leave state as-is; capture path manages registration.
+                return
+            import ctypes as _ct
+            user32 = _ct.windll.user32
+            fg = user32.GetForegroundWindow() or 0
+            relevant = False
+            GA_ROOT = 2
+            user32.GetAncestor.restype = _ct.c_void_p
+            user32.GetAncestor.argtypes = [_ct.c_void_p, _ct.c_uint]
+            for _w in (self.root, self._logs_window,
+                       self._paste_window, self._settings_window):
+                if _w is None:
+                    continue
+                try:
+                    _h = int(_w.winfo_id())
+                    if (user32.GetAncestor(_h, GA_ROOT) or _h) == fg:
+                        relevant = True
+                        break
+                except Exception:
+                    pass
+            if not relevant:
+                try:
+                    from dota_ocr.window import find_dota_hwnd as _fdh
+                    _dota = _fdh()
+                    if _dota and fg == _dota:
+                        relevant = True
+                except Exception:
+                    pass
+
+            if relevant and not self._hotkeys_active:
+                self._request_hotkey_reregister()
+                self._hotkeys_active = True
+            elif not relevant and self._hotkeys_active:
+                self._request_hotkey_unregister_all()
+                self._hotkeys_active = False
+        except Exception:
+            pass
+        finally:
+            try:
+                if not getattr(self, "_closing", False):
+                    self.root.after(250, self._poll_hotkey_gate)
+            except Exception:
+                pass
 
     # ---- hotkey rebind ----
     def _on_hotkey_rebind(self) -> None:
@@ -957,6 +1060,12 @@ class Overlay:
             self.root.destroy()
         except Exception:
             pass
+        # Hard-kill the whole process so daemon threads (PaddleOCR, translator
+        # HTTP sessions, hotkey listener) don't keep running in the background.
+        # os._exit skips atexit handlers and __del__ finalizers intentionally —
+        # we want an instant, clean stop.
+        import os as _os
+        _os._exit(0)
 
     def is_closing(self) -> bool:
         return self._closing

@@ -67,6 +67,13 @@ def _convert_body(text: str) -> str:
 # OCR often misreads the ':' separator as one of these lookalikes.
 _COLON_LOOKALIKES = "{};&"
 
+# Single-char OCR misreads that appear at the START of a line in place
+# of a ':' when the player-name portion was dropped by the brightness
+# threshold. We only treat these as colon-equivalents when they're the
+# FIRST non-space character AND followed by a space + body — never
+# mid-line, to avoid corrupting real punctuation like "hi!".
+_LEADING_COLON_MISREADS = "!‹<|>^*•·"
+
 
 def normalize_colons(text: str) -> str:
     return _normalize_colons(text)
@@ -82,6 +89,14 @@ def _normalize_colons(text: str) -> str:
         idx = text.find(ch)
         if idx >= 0:
             return text[:idx] + ':' + text[idx + 1:]
+    # Fallback: a leading single-char junk prefix ('! body', '‹ body')
+    # that OCR emitted in place of ': body' when the player name was
+    # dropped. Require a following space so real punctuation isn't
+    # affected.
+    stripped = text.lstrip()
+    if len(stripped) >= 2 and stripped[0] in _LEADING_COLON_MISREADS and stripped[1] == ' ':
+        pad = len(text) - len(stripped)
+        return text[:pad] + ':' + stripped[1:]
     return text
 
 
@@ -144,6 +159,17 @@ def is_chat_line(text: str) -> bool:
 
     # Must have a ':' separator — every chat line is "Name : message".
     if ':' not in t:
+        return False
+
+    # Body-only continuation: OCR dropped the blue player-name half of
+    # the line and left us with just ": message" (or ":message"). The
+    # body after the ':' still needs to be translated, so accept these
+    # as chat lines. We gate on "body contains real letters" to reject
+    # stray ':' from UI chrome.
+    if t.startswith(':'):
+        body = t[1:].strip()
+        if len(body) >= 2 and any(c.isalpha() for c in body):
+            return True
         return False
 
     prefix_to_colon = t[: t.index(':')]
