@@ -324,9 +324,12 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
                 print(f"[skip-notchat] {text!r}", flush=True)
                 continue
 
-            # Both directions: Russian → English AND English → Russian.
-            # has_cyrillic() is still used for language detection below;
-            # we no longer block pure-Latin (English enemy) chat here.
+            # RU → EN only: skip any line that isn't predominantly Russian.
+            # Detection (is_chat_line) still accepts team AND all chat —
+            # we just don't translate English-only messages.
+            if not has_cyrillic(text):
+                print(f"[skip-en] {text!r}", flush=True)
+                continue
 
             # Extra junk guard: a "word" is a run of letters.  Real chat
             # messages have most of their words at length >=2 and mostly
@@ -371,14 +374,9 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
                 # Apply custom glossary replacements.
                 to_translate_with_gloss = glossary.apply(to_translate, gloss)
 
-                # Detect language: Russian or English?
-                # Heuristic: count Cyrillic chars in the original (before glossary).
-                cyr_count = sum(1 for c in to_translate if "\u0400" <= c <= "\u04FF")
-                lat_count = sum(1 for c in to_translate if c.isalpha() and not ("\u0400" <= c <= "\u04FF"))
-                is_russian = cyr_count >= 3 and lat_count + cyr_count > 0 and (cyr_count / (lat_count + cyr_count)) >= 0.4
-                src = "ru" if is_russian else "en"
-                tgt = "en" if is_russian else "ru"
-
+                # RU → EN only.
+                src = "ru"
+                tgt = "en"
                 translated = translator.translate(to_translate_with_gloss, src=src, target_language=tgt)
                 if not translated:
                     continue
@@ -393,9 +391,9 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
                 if dst_norm == src_norm:
                     print(f"[skip-echo] src={src} {to_translate!r} -> {translated!r}", flush=True)
                     continue
-                # For RU→EN translation the output must be Latin (no Cyrillic).
-                # For EN→RU translation Cyrillic output is expected — don't skip.
-                if src == "ru" and any("\u0400" <= c <= "\u04FF" for c in translated):
+                # RU→EN: output must be Latin — drop any Cyrillic echoes
+                # from Google when it can't handle OCR-garbled input.
+                if any("\u0400" <= c <= "\u04FF" for c in translated):
                     print(f"[skip-ru-out] {translated!r}", flush=True)
                     continue
 
