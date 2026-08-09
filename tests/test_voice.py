@@ -8,6 +8,7 @@ audio hardware and no model download is required, so they run anywhere.
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -322,6 +323,14 @@ class TestTranscriberDeviceFallback:
     def _transcriber(self, device="auto"):
         return Transcriber(model_size="tiny", device=device)
 
+    @pytest.fixture(autouse=True)
+    def _pretend_cuda_libs_exist(self, monkeypatch):
+        """These tests cover the fallback *after* CUDA was attempted, so
+        they must not depend on whether the build machine has the CUDA
+        runtime installed. Preflight detection is covered separately in
+        TestCudaPreflight."""
+        monkeypatch.setattr(voice, "cuda_libraries_available", lambda: True)
+
     def test_falls_back_to_cpu_when_cuda_unusable(self, monkeypatch):
         tried: list[str] = []
 
@@ -398,6 +407,75 @@ class TestTranscriberDeviceFallback:
 # --------------------------------------------------------------------------
 # duplicate suppression
 # --------------------------------------------------------------------------
+
+class TestCudaPreflight:
+    """Regression: a CUDA model whose probe *hangs* rather than raising.
+
+    Observed in a real game: CTranslate2 built a cuda model (its library
+    loading is lazy, so construction succeeds), then the probe wedged
+    inside detect_language() while Dota saturated the GPU. load() holds
+    the lock for its whole duration, so the model never became ready and
+    every captured utterance was queued and dropped. Nothing was ever
+    transcribed and the UI sat on "loading model..." indefinitely.
+
+    Two independent defences: never attempt CUDA unless its libraries
+    actually load, and never let a probe block forever.
+    """
+
+    def test_preflight_false_when_dll_missing(self, monkeypatch):
+        import ctypes
+
+        def boom(name):
+            raise OSError(f"{name} not found")
+
+        monkeypatch.setattr(ctypes, "WinDLL", boom, raising=False)
+        monkeypatch.setattr(voice.sys, "platform", "win32")
+        assert voice.cuda_libraries_available() is False
+
+    def test_preflight_true_when_dlls_load(self, monkeypatch):
+        import ctypes
+
+        monkeypatch.setattr(ctypes, "WinDLL", lambda name: object(),
+                            raising=False)
+        monkeypatch.setattr(voice.sys, "platform", "win32")
+        assert voice.cuda_libraries_available() is True
+
+    def test_auto_skips_cuda_entirely_when_unavailable(self, monkeypatch):
+        """The real fix: don't even construct a CUDA model."""
+        tried: list[str] = []
+
+        def fake_build(self, device, compute_type):
+            tried.append(device)
+            return object()
+
+        monkeypatch.setattr(voice, "cuda_libraries_available", lambda: False)
+        monkeypatch.setattr(Transcriber, "_build", fake_build)
+        tr = Transcriber(model_size="tiny", device="auto")
+        assert tr.load() is True
+        assert tried == ["cpu"], "must not touch CUDA when libs are missing"
+        assert tr.device == "cpu"
+
+    def test_hanging_probe_times_out_and_falls_back(self, monkeypatch):
+        """Second defence: probe blocks forever, load() still recovers."""
+        released = threading.Event()
+        tried: list[str] = []
+
+        def fake_transcribe(*a, **k):
+            tried.append("probe")
+            released.wait(30)          # simulate the wedged GPU call
+            return iter(()), None
+
+        class FakeModel:
+            transcribe = staticmethod(fake_transcribe)
+
+        monkeypatch.setattr(voice, "PROBE_TIMEOUT_SEC", 0.3)
+        try:
+            with pytest.raises(TimeoutError):
+                Transcriber(model_size="tiny")._probe(FakeModel())
+            assert tried == ["probe"]
+        finally:
+            released.set()             # let the daemon thread unwind
+
 
 class TestDuplicateSuppression:
     def _listener(self):

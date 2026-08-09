@@ -49,6 +49,16 @@ FRAME_MS = 30              # VAD frame size
 FRAME_LEN = TARGET_RATE * FRAME_MS // 1000   # 480 samples
 
 # Utterance shaping.
+# Give up on a device whose warm-up transcription stalls. A CUDA model
+# competing with Dota for the GPU can block inside detect_language()
+# indefinitely rather than raising, which used to wedge load() forever.
+PROBE_TIMEOUT_SEC = 20.0
+
+# CTranslate2 needs these at CUDA runtime. It resolves them lazily, so
+# their absence shows up as a hang or a late error rather than at model
+# construction — we check up front instead.
+CUDA_RUNTIME_DLLS = ("cublas64_12.dll", "cudnn64_9.dll")
+
 MIN_UTTERANCE_SEC = 0.6    # shorter than this is a click/blip, not speech
 MAX_UTTERANCE_SEC = 12.0   # force a cut so long rants still get translated
 SILENCE_HANGOVER_SEC = 0.7 # trailing silence that ends an utterance
@@ -118,6 +128,31 @@ def list_loopback_devices() -> list[dict]:
             except Exception:
                 pass
     return out
+
+
+def cuda_libraries_available() -> bool:
+    """True when CTranslate2's CUDA dependencies can actually be loaded.
+
+    Having an NVIDIA GPU is not enough: the CUDA runtime is a separate
+    install most players never do. CTranslate2 resolves these lazily, so
+    without this check a GPU model builds happily and then either errors
+    on the first utterance or — with the GPU busy rendering Dota — blocks
+    inside its C extension and never returns.
+    """
+    if sys.platform != "win32":
+        return True          # let CTranslate2 decide on other platforms
+    try:
+        import ctypes
+    except Exception:
+        return False
+    for name in CUDA_RUNTIME_DLLS:
+        try:
+            ctypes.WinDLL(name)
+        except OSError:
+            print(f"[voice] CUDA unavailable ({name} not loadable) — "
+                  f"using CPU", flush=True)
+            return False
+    return True
 
 
 def pick_device(devices: list[dict], want_name: str = "",
@@ -419,17 +454,46 @@ class Transcriber:
     def ready(self) -> bool:
         return self._model is not None
 
-    def _build(self, device: str, compute_type: str):
-        """Construct a model on `device` and prove it can actually run.
+    def _probe(self, model) -> None:
+        """Force the model's lazy device init, abandoning a stalled device.
 
-        Constructing a CUDA model succeeds even when cuBLAS/cuDNN are
-        absent — CTranslate2 resolves those lazily — and `transcribe()`
-        returns a *generator*, so the "cublas64_12.dll not found" failure
-        would otherwise surface on the first real utterance, on a worker
-        thread, long after we reported the model ready.  Running a throwaway
-        transcription here forces that error to happen while we can still
-        fall back to CPU.
+        `transcribe()` returns a generator, so nothing touches the GPU
+        until it is consumed.  Draining it here makes a broken device fail
+        during load() rather than on the user's first real utterance.
+
+        The probe runs on its own thread because a CUDA model contending
+        with Dota for the GPU blocks inside CTranslate2's C extension
+        instead of raising — and a blocked C call cannot be interrupted
+        from Python.  On timeout we abandon the thread (daemon, so it dies
+        with the process) and let the caller fall back to CPU.
         """
+        audio = (np.random.RandomState(0).randn(TARGET_RATE)
+                 * 0.05).astype(np.float32)
+        failure: list[BaseException] = []
+
+        def _run() -> None:
+            try:
+                segments, _ = model.transcribe(
+                    audio, beam_size=1, vad_filter=False,
+                    without_timestamps=True,
+                )
+                list(segments)   # force the lazy generator to compute
+            except BaseException as e:     # noqa: BLE001 - reported to caller
+                failure.append(e)
+
+        thread = threading.Thread(target=_run, daemon=True,
+                                  name="whisper-probe")
+        thread.start()
+        thread.join(PROBE_TIMEOUT_SEC)
+        if thread.is_alive():
+            raise TimeoutError(
+                f"device did not respond within {PROBE_TIMEOUT_SEC:.0f}s"
+            )
+        if failure:
+            raise failure[0]
+
+    def _build(self, device: str, compute_type: str):
+        """Construct a model on `device` and prove it can actually run."""
         from faster_whisper import WhisperModel
 
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -439,12 +503,7 @@ class Transcriber:
             compute_type=compute_type,
             download_root=str(MODEL_DIR),
         )
-        probe = (np.random.RandomState(0).randn(TARGET_RATE)
-                 * 0.05).astype(np.float32)
-        segments, _ = model.transcribe(
-            probe, beam_size=1, vad_filter=False, without_timestamps=True,
-        )
-        list(segments)   # force the lazy generator to actually compute
+        self._probe(model)
         return model
 
     def load(self) -> bool:
@@ -468,12 +527,15 @@ class Transcriber:
             # "auto" means "use the GPU only if it genuinely works" — a
             # machine can have an NVIDIA card but no CUDA runtime, which is
             # the common case for users who never installed the toolkit.
+            # The preflight matters more than it looks: without it we build
+            # a CUDA model that can block forever on first use instead of
+            # raising, and load() never returns.
             if self.device == "cpu":
                 attempts = [("cpu", "int8")]
-            elif self.device == "cuda":
-                attempts = [("cuda", self.compute_type), ("cpu", "int8")]
             else:
-                attempts = [("cuda", self.compute_type), ("cpu", "int8")]
+                attempts = [("cpu", "int8")]
+                if cuda_libraries_available():
+                    attempts.insert(0, ("cuda", self.compute_type))
 
             for device, compute_type in attempts:
                 try:
