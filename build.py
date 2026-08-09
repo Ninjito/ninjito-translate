@@ -102,6 +102,11 @@ def run_pyinstaller() -> None:
             "--hidden-import", "PIL",
             "--hidden-import", "cv2",
             "--hidden-import", "mss",
+            "--hidden-import", "pyaudiowpatch",
+            "--hidden-import", "faster_whisper",
+            "--hidden-import", "ctranslate2",
+            "--hidden-import", "onnxruntime",
+            "--hidden-import", "av",
             str(ROOT / "main.py"),
         ]
     print("[build] Running PyInstaller...")
@@ -129,6 +134,31 @@ def copy_tesseract() -> None:
         print(f"[build] OK: Russian language data present ({rus.stat().st_size//1024} KB)")
 
 
+def copy_models() -> None:
+    """Ship the downloaded Whisper model next to the EXE.
+
+    voice.py resolves MODEL_DIR as `<exe dir>/models`. If it isn't there the
+    app still works, but the first time voice is enabled it silently
+    re-downloads ~500 MB — which looks like a hang. Copying it makes the
+    portable build work offline on first launch.
+    """
+    src = ROOT / "models"
+    dst = DIST / APP_NAME / "models"
+    if not src.is_dir() or not any(src.iterdir()):
+        print(
+            "[build] WARNING: no models/ folder to bundle. The app will "
+            "download the Whisper model on first voice use (needs internet)."
+        )
+        return
+    size_mb = sum(f.stat().st_size for f in src.rglob("*") if f.is_file()) // (1024 * 1024)
+    print(f"[build] Copying Whisper model ({size_mb} MB) -> {dst}")
+    if dst.exists():
+        shutil.rmtree(dst, ignore_errors=True)
+    # dirs_exist_ok so a partially-copied dir from a failed run isn't fatal.
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+    print("[build] OK: Whisper model bundled")
+
+
 def copy_config() -> None:
     src = ROOT / "config.json"
     dst = DIST / APP_NAME / "config.json"
@@ -151,14 +181,26 @@ def write_readme() -> None:
         "  3. Click the 'Resize' button to draw a box around the chat area.\n"
         "  4. Press F8 (or the Translate button) whenever you want to\n"
         "     translate the Russian chat currently visible on screen.\n\n"
+        "VOICE CHAT TRANSLATION:\n"
+        "  Open Settings (gear icon) -> Voice tab -> tick 'Enable voice\n"
+        "  translation'.  The app listens to your speakers, picks out\n"
+        "  Russian speech and shows the English underneath, marked with a\n"
+        "  speaker icon.  Toggle it any time with Ctrl+Shift+V.\n"
+        "  First activation takes a few seconds to load the speech model.\n\n"
         "CONTROLS:\n"
         "  F8                     - Translate chat right now\n"
+        "  Ctrl + Shift + V       - Toggle voice translation on/off\n"
         "  Left-drag on overlay   - Move the window\n"
         "  Shift + mouse wheel    - Adjust transparency\n"
         "  ESC (overlay focused)  - Close the app\n\n"
         "TROUBLESHOOTING:\n"
         "  * 'Dota 2 not found'  - Make sure Dota 2 is running.\n"
         "  * Garbled translations - Click Resize and re-select the chat area.\n"
+        "  * Voice hears nothing  - Settings -> Voice -> pick the output\n"
+        "                           device you actually hear Dota through\n"
+        "                           (headset vs speakers).\n"
+        "  * Voice lags a few sec - Normal on CPU. Pick a smaller model in\n"
+        "                           Settings -> Voice if you want it faster.\n"
         "  * Antivirus warning    - False positive from PyInstaller. You can\n"
         "                           whitelist the EXE.\n",
         encoding="utf-8",
@@ -171,6 +213,7 @@ def main() -> None:
     clean()
     run_pyinstaller()
     copy_tesseract()
+    copy_models()
     copy_config()
     write_readme()
     final = DIST / APP_NAME

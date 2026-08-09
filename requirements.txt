@@ -4,3 +4,10 @@ opencv-python>=4.8.0
 numpy>=1.24.0
 deep-translator>=1.11.0
 Pillow>=10.0.0
+
+# --- Russian voice-chat translation ---
+# faster-whisper runs on CTranslate2, so it needs neither torch nor CUDA.
+# pyaudiowpatch is a PyAudio fork that adds WASAPI loopback, which is the
+# only way to capture Dota's voice chat (it comes out of the speakers).
+faster-whisper>=1.0.0
+PyAudioWPatch>=0.2.12

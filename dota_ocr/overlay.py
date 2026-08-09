@@ -20,6 +20,12 @@ from tkinter import ttk
 
 from dota_ocr import sizes as _sz
 
+# Marker written into a message's `original` field to flag it as coming
+# from voice chat rather than text chat.  Using a sentinel in the existing
+# (original, translated) tuple keeps the message-queue shape unchanged,
+# which matters because clear()/_render()/_autosize() all consume it.
+VOICE_PREFIX = "🔊"
+
 
 def _resource_path(name: str) -> str:
     """Locate a bundled resource both in dev and under PyInstaller.
@@ -231,9 +237,11 @@ class Overlay:
         hotkey_vk: int = 0x76,  # F7
         on_recalibrate=None,  # callback(new_relative_bbox: dict) when user resizes
         on_hotkey_changed=None,  # callback(new_vk: int, name: str) on rebind
+        on_voice_toggle=None,  # callback(enabled: bool) -> bool (actual state)
         cfg: dict = None,
     ):
         self._cfg = cfg or {}
+        self._on_voice_toggle = on_voice_toggle
         self.max_messages = max_messages
         self._msg_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
         self._trigger_event = threading.Event()
@@ -375,6 +383,24 @@ class Overlay:
         _attach_tooltip(self._paste_btn,
                         lambda: f"Paste — type & translate to Russian ({self._hk_name('paste')})")
 
+        self._voice_btn = tk.Button(
+            bar,
+            text="🎙",
+            bg="#2a2a2a",
+            fg="#777777",
+            activebackground="#3a3a3a",
+            activeforeground="#7bd8b0",
+            font=("Consolas", 10, "bold"),
+            relief="flat",
+            padx=6,
+            cursor="hand2",
+            command=self._on_voice_toggle_click,
+        )
+        self._voice_btn.pack(side="left", padx=2, pady=2)
+        _attach_tooltip(self._voice_btn,
+                        lambda: f"Voice — translate Russian voice chat "
+                                f"({self._hk_name('voice_toggle')})")
+
         self._settings_btn = tk.Button(
             bar,
             text="⚙️",
@@ -507,6 +533,7 @@ class Overlay:
         self.text.tag_configure("allies", foreground="#6bb8ff")      # blue
         self.text.tag_configure("all", foreground="#e0e0e0")          # white
         self.text.tag_configure("spectator", foreground="#aaaaaa")    # gray
+        self.text.tag_configure("voice", foreground="#ffb86c")        # orange
         self.text.pack(side="left", fill="both", expand=True)
 
         scrollbar.config(command=self.text.yview)
@@ -581,6 +608,9 @@ class Overlay:
             8: {"name": "spam_stop", "label": "Stop chat-spam burst",
                 "vk": 0x51, "mods": MOD_CTRL | MOD_SHIFT,   # Ctrl+Shift+Q
                 "handler": lambda: self.root.after(0, self._spam_stop)},
+            9: {"name": "voice_toggle", "label": "Voice translation on/off",
+                "vk": 0x56, "mods": MOD_CTRL | MOD_SHIFT,   # Ctrl+Shift+V
+                "handler": lambda: self.root.after(0, self._on_voice_toggle_click)},
         }
         # Load overrides from cfg["hotkeys"] if present.
         stored = (self._cfg or {}).get("hotkeys", {}) if hasattr(self, "_cfg") else {}
@@ -635,6 +665,10 @@ class Overlay:
         # Re-sync auto-mode UI now that cfg is guaranteed to be hydrated.
         try:
             self._update_translate_visibility()
+        except Exception:
+            pass
+        try:
+            self._update_voice_button()
         except Exception:
             pass
 
@@ -924,6 +958,52 @@ class Overlay:
                 pass
 
     # ---- translate trigger ----
+    # ---- voice translation ----
+    def _on_voice_toggle_click(self) -> None:
+        """Flip voice translation on/off and persist the choice.
+
+        The callback owns the listener and returns the state it actually
+        reached — starting can fail (no loopback device, model download
+        blocked), and the UI must show what really happened rather than
+        what was requested.
+        """
+        want = not bool((self._cfg or {}).get("voice", {}).get("enabled", False))
+        actual = want
+        if self._on_voice_toggle is not None:
+            try:
+                actual = bool(self._on_voice_toggle(want))
+            except Exception as e:
+                print(f"[voice] toggle failed: {e}", flush=True)
+                actual = False
+        self._set_voice_cfg("enabled", actual)
+        self._update_voice_button()
+        if actual:
+            self.set_status("Voice: starting...", "#ffa500")
+        else:
+            self.set_status("Voice: off" if want == actual
+                            else "Voice: failed to start", "#888")
+
+    def _update_voice_button(self) -> None:
+        """Repaint the mic button to match the current voice state."""
+        try:
+            on = bool((self._cfg or {}).get("voice", {}).get("enabled", False))
+            self._voice_btn.configure(
+                text="🎙" if on else "🎙",
+                bg="#1a3a2a" if on else "#2a2a2a",
+                fg="#7bd8b0" if on else "#777777",
+            )
+        except Exception:
+            pass
+
+    def _set_voice_cfg(self, key: str, value) -> None:
+        """Update one key inside the nested cfg['voice'] block on disk."""
+        if self._cfg is None:
+            self._cfg = {}
+        block = dict(self._cfg.get("voice") or {})
+        block[key] = value
+        self._cfg["voice"] = block
+        self._set_cfg("voice", block)
+
     def _on_translate_click(self) -> None:
         self._status.configure(text="Capturing...", fg="#ffa500")
         self._trigger_event.set()
@@ -1246,15 +1326,40 @@ class Overlay:
     def push(self, original: str, translated: str) -> None:
         self._msg_queue.put((original, translated))
 
+    def push_voice(self, russian: str, english: str) -> None:
+        """Push a translated voice-chat line.
+
+        Called from the voice worker thread — safe because the queue is
+        the only thing touched here, and Tk work happens in _drain().
+        """
+        self._msg_queue.put((f"{VOICE_PREFIX} {russian}",
+                             f"{VOICE_PREFIX} {english}"))
+
+    @staticmethod
+    def _is_voice(original: str) -> bool:
+        return original.lstrip().startswith(VOICE_PREFIX)
+
     def clear(self) -> None:
-        """Clear all shown translations (called before each F7 batch)."""
-        self._messages = []
+        """Clear shown chat translations before each F7 batch.
+
+        Voice lines survive: they arrive on their own schedule and aren't
+        part of the OCR batch, so wiping them here would make spoken
+        translations vanish the instant the user pressed Translate.
+        """
+        self._messages = [m for m in self._messages if self._is_voice(m[0])]
         try:
             self.text.configure(state="normal")
             self.text.delete("1.0", "end")
             self.text.configure(state="disabled")
         except Exception:
             pass
+        # Repaint whatever voice lines were kept.
+        if self._messages:
+            try:
+                self._render()
+                return
+            except Exception:
+                pass
         # Shrink overlay back to the default height now that it's empty.
         try:
             self._autosize_to_messages(visible=_sz.AUTOSIZE_MESSAGES)
@@ -1616,7 +1721,9 @@ class Overlay:
         for orig, trans in self._messages[-5:]:
             tag = "all"
             orig_lower = orig.lower()
-            if "[allies]" in orig_lower:
+            if self._is_voice(orig):
+                tag = "voice"
+            elif "[allies]" in orig_lower:
                 tag = "allies"
             elif "[spectator]" in orig_lower or "[observer]" in orig_lower:
                 tag = "spectator"
@@ -1760,9 +1867,11 @@ class Overlay:
 
         tab_hk = tk.Frame(nb, bg="#0a0a0a")
         tab_cap = tk.Frame(nb, bg="#0a0a0a")
+        tab_voice = tk.Frame(nb, bg="#0a0a0a")
         tab_thm = tk.Frame(nb, bg="#0a0a0a")
         nb.add(tab_hk,  text="Hotkeys")
         nb.add(tab_cap, text="Capture")
+        nb.add(tab_voice, text="Voice")
         nb.add(tab_thm, text="Theme")
 
         # ── Hotkeys tab ───────────────────────────────────────────────
@@ -1926,6 +2035,106 @@ class Overlay:
                              self._apply_auto_chat_watch()),
         ).pack(anchor="w", padx=12, pady=(6, 2))
 
+        # ── Voice tab: loopback capture + Whisper transcription ───────
+        vblock = dict(cfg.get("voice") or {})
+        voice_on_var = tk.BooleanVar(value=bool(vblock.get("enabled", False)))
+        model_var = tk.StringVar(value=str(vblock.get("model_size", "small")))
+
+        tk.Label(tab_voice, text="Russian voice chat",
+                 bg="#0a0a0a", fg="#ffd84a",
+                 font=("Consolas", 10, "bold")
+                 ).pack(anchor="w", padx=12, pady=(12, 2))
+        tk.Label(tab_voice,
+                 text="Listens to your speakers (not your mic), transcribes\n"
+                      "Russian speech and shows it translated in the overlay.",
+                 bg="#0a0a0a", fg="#888",
+                 font=("Consolas", 8), justify="left"
+                 ).pack(anchor="w", padx=12)
+
+        tk.Checkbutton(
+            tab_voice, text="Enable voice translation",
+            variable=voice_on_var,
+            bg="#0a0a0a", fg="#e0e0e0", selectcolor="#2a2a1a",
+            activebackground="#0a0a0a", activeforeground="#ffd84a",
+            font=("Consolas", 9), borderwidth=0,
+            command=lambda: self._settings_voice_enable(voice_on_var),
+        ).pack(anchor="w", padx=12, pady=(6, 2))
+
+        # --- Output device ---
+        tk.Label(tab_voice, text="Listen to output device:",
+                 bg="#0a0a0a", fg="#bbb",
+                 font=("Consolas", 9)).pack(anchor="w", padx=12, pady=(10, 2))
+
+        try:
+            from dota_ocr import voice as _voice
+            devices = _voice.list_loopback_devices()
+        except Exception as e:
+            print(f"[voice] settings device list failed: {e}", flush=True)
+            devices = []
+
+        # Strip the " [Loopback]" suffix for display — it's an artifact of
+        # how WASAPI exposes the device, not something the user chose.
+        dev_labels = ["Default output (auto)"] + [
+            d["name"].replace(" [Loopback]", "") for d in devices
+        ]
+        cur_name = str(vblock.get("device_name", "") or "")
+        cur_label = dev_labels[0]
+        for d, label in zip(devices, dev_labels[1:]):
+            if d["name"] == cur_name:
+                cur_label = label
+                break
+        dev_var = tk.StringVar(value=cur_label)
+
+        def _on_dev_change(_evt=None):
+            picked = dev_var.get()
+            if picked == dev_labels[0]:
+                self._set_voice_cfg("device_name", "")
+                self._set_voice_cfg("device_index", None)
+            else:
+                for dd, lab in zip(devices, dev_labels[1:]):
+                    if lab == picked:
+                        self._set_voice_cfg("device_name", dd["name"])
+                        self._set_voice_cfg("device_index", dd["index"])
+                        break
+            self._settings_voice_restart()
+
+        dev_combo = ttk.Combobox(tab_voice, values=dev_labels,
+                                 textvariable=dev_var, state="readonly",
+                                 font=("Consolas", 9), width=38)
+        dev_combo.pack(anchor="w", padx=12)
+        dev_combo.bind("<<ComboboxSelected>>", _on_dev_change)
+        if not devices:
+            tk.Label(tab_voice,
+                     text="No loopback device found — voice capture "
+                          "is unavailable.",
+                     bg="#0a0a0a", fg="#ff8844",
+                     font=("Consolas", 8)).pack(anchor="w", padx=12, pady=(2, 0))
+
+        # --- Model size ---
+        tk.Label(tab_voice, text="Recognition model:",
+                 bg="#0a0a0a", fg="#bbb",
+                 font=("Consolas", 9)).pack(anchor="w", padx=12, pady=(10, 2))
+        row_model = tk.Frame(tab_voice, bg="#0a0a0a")
+        row_model.pack(fill="x", padx=12)
+        for val, desc in (("base", "fastest"),
+                          ("small", "balanced"),
+                          ("medium", "most accurate")):
+            tk.Radiobutton(
+                row_model, text=f"{val} ({desc})", variable=model_var, value=val,
+                bg="#0a0a0a", fg="#e0e0e0", selectcolor="#ffd84a",
+                activebackground="#0a0a0a", activeforeground="#ffd84a",
+                font=("Consolas", 8), borderwidth=0, indicatoron=True,
+                command=lambda v=val: (self._set_voice_cfg("model_size", v),
+                                       self._settings_voice_restart()),
+            ).pack(anchor="w")
+
+        tk.Label(tab_voice,
+                 text="Changing the model downloads it once (~150MB-1.5GB).\n"
+                      "The first line after enabling may take a few seconds.",
+                 bg="#0a0a0a", fg="#777",
+                 font=("Consolas", 8), justify="left"
+                 ).pack(anchor="w", padx=12, pady=(8, 4))
+
         # ── Theme tab ─────────────────────────────────────────────────
         theme_var = tk.StringVar(value=str(cfg.get("theme", "dark")))
         tk.Label(tab_thm, text="Overlay theme",
@@ -1996,6 +2205,41 @@ class Overlay:
         win.after(50, lambda: threading.Thread(
             target=_settings_grab, daemon=True).start())
 
+    def _settings_voice_enable(self, var) -> None:
+        """Settings-tab checkbox handler.
+
+        Routes through the same toggle path as the hotkey/button so the
+        listener, the config and the mic button can't drift apart, then
+        syncs the checkbox back in case the start attempt failed.
+        """
+        want = bool(var.get())
+        cur = bool((self._cfg or {}).get("voice", {}).get("enabled", False))
+        if want != cur:
+            self._on_voice_toggle_click()
+        try:
+            var.set(bool((self._cfg or {}).get("voice", {}).get("enabled", False)))
+        except Exception:
+            pass
+
+    def _settings_voice_restart(self) -> None:
+        """Re-apply voice settings that need the listener rebuilt.
+
+        The device and model are bound when the listener starts, so a
+        change only takes effect after a stop/start cycle — and only if
+        voice is actually on right now.
+        """
+        if not bool((self._cfg or {}).get("voice", {}).get("enabled", False)):
+            return
+        if self._on_voice_toggle is None:
+            return
+        try:
+            self._on_voice_toggle(False)
+            ok = bool(self._on_voice_toggle(True))
+            self._set_voice_cfg("enabled", ok)
+            self._update_voice_button()
+        except Exception as e:
+            print(f"[voice] restart failed: {e}", flush=True)
+
     def _bootstrap_defaults(self) -> None:
         """Make sure every setting the app reads has a value in cfg +
         on disk.  Runs once at startup after _action_defs is built.
@@ -2053,6 +2297,30 @@ class Overlay:
             # Also mirror into in-memory cfg so other code paths see it.
             self._cfg.setdefault(k, data[k])
 
+        # 3. Voice block. Merged key-by-key so upgrading an existing
+        #    install picks up new voice settings without resetting the
+        #    ones the user already chose.
+        voice_defaults = {
+            "enabled": False,          # opt-in: never load a model unasked
+            "device_name": "",         # "" = default output device
+            "device_index": None,
+            "model_size": "small",
+            "compute_device": "auto",  # falls back to CPU if CUDA is absent
+            "compute_type": "int8",
+            "lang_prob_min": 0.6,      # reject non-Russian below this
+            "min_avg_logprob": -1.0,   # reject low-confidence audio
+            "use_dota_prompt": True,
+        }
+        cur_voice = dict(data.get("voice") or {})
+        for k, v in voice_defaults.items():
+            if k not in cur_voice:
+                cur_voice[k] = v
+                dirty = True
+        if data.get("voice") != cur_voice:
+            data["voice"] = cur_voice
+            dirty = True
+        self._cfg["voice"] = dict(cur_voice)
+
         if dirty:
             try:
                 cfg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2098,7 +2366,7 @@ class Overlay:
                 self.root.attributes("-alpha", max(0.75, self._alpha))
                 tag_colors = {"dst": "#1a5a1a", "allies": "#1a4a8a",
                               "all": "#222222", "spectator": "#555555",
-                              "src": "#555555"}
+                              "src": "#555555", "voice": "#a05000"}
             elif theme == "transparent":
                 # Text floats directly over Dota.  Use black bold text —
                 # coloured text (green/blue) disappears against grass /
@@ -2114,7 +2382,7 @@ class Overlay:
                     pass
                 tag_colors = {"dst": "#000000", "allies": "#000000",
                               "all": "#000000", "spectator": "#000000",
-                              "src": "#000000"}
+                              "src": "#000000", "voice": "#000000"}
             else:  # dark (default)
                 bg, text_bg, fg = "#0a0a0a", "#0a0a0a", "#e0e0e0"
                 try:
@@ -2124,7 +2392,7 @@ class Overlay:
                 self.root.attributes("-alpha", self._alpha)
                 tag_colors = {"dst": "#7bd88f", "allies": "#6bb8ff",
                               "all": "#e0e0e0", "spectator": "#aaaaaa",
-                              "src": "#8a8a8a"}
+                              "src": "#8a8a8a", "voice": "#ffb86c"}
             try:
                 self.root.configure(bg=bg)
                 self.text.configure(bg=text_bg, fg=fg, insertbackground=fg)

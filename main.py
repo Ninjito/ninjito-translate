@@ -87,6 +87,75 @@ import time
 import traceback
 from pathlib import Path
 
+# Russian transcriptions and chat lines are Cyrillic, but the Windows
+# console defaults to cp1252 and raises UnicodeEncodeError on print.
+# Degrade to '?' characters instead of losing the log line.
+for _stream in ("stdout", "stderr"):
+    try:
+        getattr(sys, _stream).reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+def _install_file_log() -> None:
+    """Mirror stdout/stderr into logs/app.log.
+
+    The packaged EXE is built with --noconsole, so sys.stdout is None and
+    every diagnostic the app prints is lost. That makes a failure in the
+    voice pipeline (which surfaces at runtime, not at build time)
+    invisible and unreportable. Writing to a file keeps them.
+    """
+    try:
+        base = (Path(sys.executable).resolve().parent
+                if getattr(sys, "frozen", False)
+                else Path(__file__).resolve().parent)
+        log_dir = base / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "app.log"
+        # Truncate per launch; a stale 100 MB log helps nobody.
+        handle = open(log_path, "w", encoding="utf-8", errors="replace",
+                      buffering=1)
+
+        class _Tee:
+            """Write to the real stream (if any) and the log file."""
+
+            def __init__(self, stream, sink):
+                self._stream = stream
+                self._sink = sink
+
+            def write(self, data):
+                if self._stream is not None:
+                    try:
+                        self._stream.write(data)
+                    except Exception:
+                        pass
+                try:
+                    self._sink.write(data)
+                except Exception:
+                    pass
+                return len(data)
+
+            def flush(self):
+                for target in (self._stream, self._sink):
+                    if target is not None:
+                        try:
+                            target.flush()
+                        except Exception:
+                            pass
+
+            def isatty(self):
+                return False
+
+        sys.stdout = _Tee(sys.stdout, handle)
+        sys.stderr = _Tee(sys.stderr, handle)
+        globals()["_LOG_HANDLE"] = handle  # keep alive for process lifetime
+        print(f"[log] writing to {log_path}", flush=True)
+    except Exception:
+        pass
+
+
+_install_file_log()
+
 import cv2
 
 from dota_ocr.capture import RegionCapture
@@ -451,6 +520,65 @@ def save_config(cfg: dict) -> None:
         json.dump(cfg, f, indent=2)
 
 
+def _make_voice_toggle(overlay: Overlay, cfg: dict, holder: dict):
+    """Build the callback the overlay uses to switch voice translation.
+
+    Returns callback(enabled: bool) -> bool, where the return value is the
+    state actually reached — starting can fail (no loopback device, model
+    download blocked) and the UI must reflect reality, not intent.
+
+    The listener is created lazily on first enable so that users who never
+    turn voice on never pay the model-loading cost.
+    """
+    def toggle(enabled: bool) -> bool:
+        listener = holder.get("listener")
+        if not enabled:
+            if listener is not None:
+                try:
+                    listener.stop()
+                except Exception as e:
+                    print(f"[voice] stop failed: {e}", flush=True)
+            return False
+
+        # Rebuild each time we enable so device/model config changes apply.
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                pass
+
+        try:
+            from dota_ocr.voice import VoiceListener
+        except Exception as e:
+            print(f"[voice] unavailable: {e}", flush=True)
+            overlay.set_status("Voice: not installed", "#ff4444")
+            return False
+
+        def on_result(russian: str, english: str) -> None:
+            overlay.push_voice(russian, english)
+            # Tagged in the log too, so the history window distinguishes
+            # what was spoken from what was typed.
+            history.append(f"🔊 {russian}", f"🔊 {english}")
+
+        try:
+            listener = VoiceListener(
+                cfg=cfg,
+                translator=Translator(target=cfg.get("target_language", "en")),
+                on_result=on_result,
+                on_status=overlay.set_status,
+                glossary_map=glossary.load(),
+            )
+            holder["listener"] = listener
+            return bool(listener.start())
+        except Exception as e:
+            print(f"[voice] start failed: {e}", flush=True)
+            traceback.print_exc()
+            overlay.set_status("Voice: failed to start", "#ff4444")
+            return False
+
+    return toggle
+
+
 def main() -> None:
     enable_dpi_awareness()
     cfg = load_config()
@@ -458,6 +586,7 @@ def main() -> None:
     # Shared mutable state so the recalibrate callback can update the
     # running capture without restarting the worker thread.
     shared = {"cfg": cfg, "capture_ref": None}
+    voice_holder: dict = {"listener": None}
 
     def on_recalibrate(new_rel: dict) -> None:
         cfg["chat_region_relative"] = new_rel
@@ -488,7 +617,27 @@ def main() -> None:
     overlay_kwargs["on_recalibrate"] = on_recalibrate
     overlay_kwargs["on_hotkey_changed"] = on_hotkey_changed
     overlay_kwargs["cfg"] = cfg
+    # Late-bound so the callback can capture `overlay` itself.
+    overlay_kwargs["on_voice_toggle"] = lambda en: voice_holder["toggle"](en)
     overlay = Overlay(**overlay_kwargs)
+    voice_holder["toggle"] = _make_voice_toggle(overlay, cfg, voice_holder)
+
+    # Restore the previous session's voice state. Deferred onto the Tk
+    # loop so a slow model load can't stall the overlay from appearing.
+    if bool((cfg.get("voice") or {}).get("enabled", False)):
+        def _resume_voice() -> None:
+            ok = voice_holder["toggle"](True)
+            if not ok:
+                try:
+                    overlay._set_voice_cfg("enabled", False)
+                except Exception:
+                    pass
+            try:
+                overlay._update_voice_button()
+            except Exception:
+                pass
+        overlay.root.after(600, _resume_voice)
+
     stop_event = threading.Event()
     t = threading.Thread(
         target=_worker_respawn, args=(overlay, cfg, stop_event, shared),
@@ -508,6 +657,12 @@ def main() -> None:
                 time.sleep(0.5)
     finally:
         stop_event.set()
+        listener = voice_holder.get("listener")
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

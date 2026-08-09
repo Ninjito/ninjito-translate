@@ -22,6 +22,22 @@ build/
 dist/
 *.spec
 *.manifest
+# ...but DO track the real build spec. It carries the collect_all() calls
+# that pull in faster-whisper's Silero VAD asset plus the ctranslate2 /
+# onnxruntime / av DLLs, and upx=False (UPX corrupts those DLLs). Without
+# this file a fresh clone falls back to build.py's inline flags, which
+# produce an EXE that builds fine and then dies the moment voice starts.
+!NinjitoTranslate.spec
+
+# --- Whisper speech model (~460 MB, redownloaded on demand) ---
+# Far over GitHub's 100 MB per-file limit. build.py copies it into the
+# dist folder; if it's missing the app fetches it on first voice use.
+models/
+
+# --- Packaged release archives ---
+*.rar
+*.zip
+*.7z
 
 # --- Bundled Tesseract (users install their own or we ship via build.py) ---
 Tesseract-OCR/

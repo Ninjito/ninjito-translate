@@ -55,10 +55,25 @@
     "spam_stop": {
       "vk": 81,
       "mods": 6
+    },
+    "voice_toggle": {
+      "vk": 86,
+      "mods": 6
     }
   },
   "auto_translate_on_chat": true,
   "auto_ocr_enabled": true,
   "theme": "dark",
-  "auto_ocr_interval_sec": 2
+  "auto_ocr_interval_sec": 2,
+  "voice": {
+    "enabled": true,
+    "device_name": "",
+    "device_index": null,
+    "model_size": "small",
+    "compute_device": "auto",
+    "compute_type": "int8",
+    "lang_prob_min": 0.6,
+    "min_avg_logprob": -1.0,
+    "use_dota_prompt": true
+  }
 }
