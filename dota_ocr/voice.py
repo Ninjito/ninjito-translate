@@ -59,7 +59,14 @@ PROBE_TIMEOUT_SEC = 20.0
 # construction — we check up front instead.
 CUDA_RUNTIME_DLLS = ("cublas64_12.dll", "cudnn64_9.dll")
 
-MIN_UTTERANCE_SEC = 0.6    # shorter than this is a click/blip, not speech
+# Utterances at or below this (including pre-roll and hangover padding)
+# are treated as "short", where Whisper's language_probability is too
+# noisy to gate on — it reflects how much audio the detector got as much
+# as what language it heard.
+SHORT_UTTERANCE_SEC = 2.0
+MAX_NO_SPEECH_PROB = 0.6   # the model's own "this isn't speech" signal
+
+MIN_UTTERANCE_SEC = 0.25   # shorter than this is a click/blip, not speech
 MAX_UTTERANCE_SEC = 12.0   # force a cut so long rants still get translated
 SILENCE_HANGOVER_SEC = 0.7 # trailing silence that ends an utterance
 PREROLL_SEC = 0.3          # audio kept from *before* speech was detected
@@ -128,6 +135,58 @@ def list_loopback_devices() -> list[dict]:
             except Exception:
                 pass
     return out
+
+
+REJECT_LANG = "lang"
+REJECT_CONF = "conf"
+REJECT_NOT_SPEECH = "notspeech"
+
+
+def accept_utterance(text: str, lang: str, lang_prob: float, avg_lp: float,
+                     no_speech_prob: float, duration_sec: float, *,
+                     lang_prob_min: float = 0.6,
+                     min_avg_logprob: float = -1.0,
+                     short_sec: float = SHORT_UTTERANCE_SEC,
+                     max_no_speech: float = MAX_NO_SPEECH_PROB) -> str:
+    """Decide whether a transcription is a real Russian call.
+
+    Returns "" to accept, else a short reason for the log.
+
+    Long utterances are gated on Whisper's detected language, which is
+    reliable once it has a couple of seconds to work with.
+
+    Short ones are not: language_probability drops with duration, so the
+    same 0.60 floor that correctly rejects English rejects "беги" too,
+    purely for being brief. Real in-game calls are mostly short, so that
+    silently discarded the most useful messages. Below `short_sec` we
+    drop lang_prob and gate on evidence that survives short audio —
+    Cyrillic in the output (English game audio has none), the model's own
+    no_speech_prob, and acoustic confidence.
+    """
+    stripped = text.strip()
+    if len(stripped) < 2:
+        return REJECT_EMPTY
+
+    # Acoustic confidence and the text-shape filters apply at every
+    # length: music, SFX and hallucinated subtitle credits are rejected
+    # the same way whether they lasted half a second or ten.
+    if avg_lp < min_avg_logprob:
+        return REJECT_CONF
+    reason = _reject_reason(stripped)
+    if reason:
+        return reason
+
+    if duration_sec > short_sec:
+        if lang != "ru" or lang_prob < lang_prob_min:
+            return REJECT_LANG
+        return ""
+
+    # Short: the script of the text is the trustworthy signal.
+    if no_speech_prob > max_no_speech:
+        return REJECT_NOT_SPEECH
+    if not has_cyrillic(stripped):
+        return REJECT_NO_CYRILLIC
+    return ""
 
 
 def cuda_libraries_available() -> bool:
@@ -442,6 +501,8 @@ class Transcriber:
         self._model = None
         self._lock = threading.Lock()
         self.last_error = ""
+        # Set by transcribe(); read alongside its return value.
+        self.last_no_speech_prob = 0.0
 
     def _status(self, text: str, color: str = "#888") -> None:
         if self._on_status:
@@ -581,12 +642,17 @@ class Transcriber:
         )
         parts: list[str] = []
         logprobs: list[float] = []
+        no_speech: list[float] = []
         for seg in segments:
             parts.append(seg.text)
             logprobs.append(float(getattr(seg, "avg_logprob", -1.0)))
+            no_speech.append(float(getattr(seg, "no_speech_prob", 0.0)))
 
         text = " ".join(p.strip() for p in parts).strip()
         avg_lp = float(np.mean(logprobs)) if logprobs else -99.0
+        # Worst segment wins: one clearly-not-speech segment is enough to
+        # distrust the whole utterance.
+        self.last_no_speech_prob = max(no_speech) if no_speech else 1.0
         return (text,
                 str(getattr(info, "language", "") or ""),
                 float(getattr(info, "language_probability", 0.0) or 0.0),
@@ -821,30 +887,29 @@ class VoiceListener:
         if not text.strip():
             return
 
+        no_speech = float(getattr(tr, "last_no_speech_prob", 0.0))
+        duration = utt.size / TARGET_RATE
+
         debug = bool((self._cfg or {}).get("debug"))
         if debug:
-            print(f"[voice] {elapsed:.1f}s lang={lang}({lang_prob:.2f}) "
-                  f"lp={avg_lp:.2f} {text!r}", flush=True)
+            print(f"[voice] {duration:.1f}s audio / {elapsed:.1f}s "
+                  f"lang={lang}({lang_prob:.2f}) lp={avg_lp:.2f} "
+                  f"ns={no_speech:.2f} {text!r}", flush=True)
 
-        # Filter 1 — language. English announcer/hero lines land here.
-        min_prob = float(v.get("lang_prob_min", 0.6))
-        if lang != "ru" or lang_prob < min_prob:
-            print(f"[voice-skip:lang] {lang}({lang_prob:.2f}) {text!r}", flush=True)
-            return
-
-        # Filter 2 — acoustic confidence. Music and SFX score badly.
-        min_lp = float(v.get("min_avg_logprob", -1.0))
-        if avg_lp < min_lp:
-            print(f"[voice-skip:conf] lp={avg_lp:.2f} {text!r}", flush=True)
-            return
-
-        # Filter 3 — text shape (Cyrillic / hallucination / repeat loop).
-        reason = _reject_reason(text)
+        reason = accept_utterance(
+            text, lang, lang_prob, avg_lp, no_speech, duration,
+            lang_prob_min=float(v.get("lang_prob_min", 0.6)),
+            min_avg_logprob=float(v.get("min_avg_logprob", -1.0)),
+            short_sec=float(v.get("short_utterance_sec", SHORT_UTTERANCE_SEC)),
+            max_no_speech=float(v.get("max_no_speech_prob",
+                                      MAX_NO_SPEECH_PROB)),
+        )
         if reason:
-            print(f"[voice-skip:{reason}] {text!r}", flush=True)
+            print(f"[voice-skip:{reason}] {lang}({lang_prob:.2f}) "
+                  f"{duration:.1f}s {text!r}", flush=True)
             return
 
-        # Filter 4 — don't re-show the same line the model emits twice when
+        # Don't re-show the same line the model emits twice when
         # a long utterance gets split across two segments.
         if self._is_duplicate(text):
             print(f"[voice-skip:dup] {text!r}", flush=True)

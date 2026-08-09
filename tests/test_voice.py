@@ -408,6 +408,74 @@ class TestTranscriberDeviceFallback:
 # duplicate suppression
 # --------------------------------------------------------------------------
 
+class TestShortUtteranceAcceptance:
+    """Short calls ("беги", "стой", "мид") were being dropped wholesale.
+
+    Whisper's language_probability scales with how much audio it gets, so
+    a fixed 0.60 floor rejects short speech for being short rather than
+    for being wrong -- a real "Бабака." came back as ru(0.34). Below
+    SHORT_UTTERANCE_SEC we therefore ignore lang_prob and lean on signals
+    that hold up on brief audio: the script of the text, no_speech_prob,
+    and the hallucination filters.
+    """
+
+    LONG = 4.0
+    SHORT = 1.2
+
+    def accept(self, **kw):
+        args = dict(text="иди мид", lang="ru", lang_prob=0.95,
+                    avg_lp=-0.4, no_speech_prob=0.1,
+                    duration_sec=self.LONG)
+        args.update(kw)
+        return voice.accept_utterance(**args)
+
+    # --- the regression -------------------------------------------------
+    def test_short_russian_with_low_lang_prob_is_accepted(self):
+        """The exact shape of the dropped 'Бабака.' case."""
+        assert self.accept(text="беги", lang="ru", lang_prob=0.34,
+                           avg_lp=-0.79, duration_sec=self.SHORT) == ""
+
+    def test_long_russian_still_needs_lang_prob(self):
+        """Length means the detector had enough signal; keep trusting it."""
+        assert self.accept(lang_prob=0.34, duration_sec=self.LONG) != ""
+
+    # --- short clips must not become a free-for-all ----------------------
+    def test_short_latin_text_rejected(self):
+        """English game audio has no Cyrillic to vouch for it."""
+        assert self.accept(text="go go go", lang="en", lang_prob=0.3,
+                           duration_sec=self.SHORT) != ""
+
+    def test_short_rejected_when_model_says_not_speech(self):
+        assert self.accept(text="беги", lang_prob=0.3, no_speech_prob=0.9,
+                           duration_sec=self.SHORT) != ""
+
+    def test_short_rejected_on_poor_acoustic_confidence(self):
+        assert self.accept(text="беги", lang_prob=0.3, avg_lp=-2.0,
+                           duration_sec=self.SHORT) != ""
+
+    def test_short_hallucination_still_rejected(self):
+        assert self.accept(text="Субтитры сделал DimaTorzok",
+                           lang_prob=0.3, duration_sec=self.SHORT) != ""
+
+    def test_short_single_character_rejected(self):
+        assert self.accept(text="а", lang_prob=0.3,
+                           duration_sec=self.SHORT) != ""
+
+    # --- long-clip behaviour is unchanged --------------------------------
+    def test_long_english_rejected(self):
+        assert self.accept(text="go go go", lang="en", lang_prob=0.98) != ""
+
+    def test_long_russian_accepted(self):
+        assert self.accept() == ""
+
+    def test_long_poor_confidence_rejected(self):
+        assert self.accept(avg_lp=-1.5) != ""
+
+    def test_reason_is_reported_for_logging(self):
+        reason = self.accept(text="go go go", lang="en", lang_prob=0.98)
+        assert isinstance(reason, str) and reason
+
+
 class TestCudaPreflight:
     """Regression: a CUDA model whose probe *hangs* rather than raising.
 

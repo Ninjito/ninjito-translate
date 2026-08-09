@@ -2309,6 +2309,12 @@ class Overlay:
             "compute_type": "int8",
             "lang_prob_min": 0.6,      # reject non-Russian below this
             "min_avg_logprob": -1.0,   # reject low-confidence audio
+            # Whisper's language confidence falls off on short audio, so
+            # utterances at or under this length skip the lang_prob gate
+            # and are judged on Cyrillic + no_speech_prob instead. Raise
+            # it to catch more short calls, lower it if noise gets in.
+            "short_utterance_sec": 2.0,
+            "max_no_speech_prob": 0.6,
             "use_dota_prompt": True,
         }
         cur_voice = dict(data.get("voice") or {})

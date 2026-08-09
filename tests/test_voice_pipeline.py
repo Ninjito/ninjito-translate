@@ -27,8 +27,9 @@ class StubTranscriber:
     """Stands in for faster-whisper, returning a canned result."""
 
     def __init__(self, text: str, lang: str = "ru", prob: float = 0.95,
-                 logprob: float = -0.35):
+                 logprob: float = -0.35, no_speech: float = 0.05):
         self.result = (text, lang, prob, logprob)
+        self.last_no_speech_prob = no_speech
         self.calls = 0
 
     def transcribe(self, audio):
@@ -111,11 +112,37 @@ class TestRejection:
         vl._handle_utterance(loud_audio())
         assert results == []
 
-    def test_low_language_confidence_dropped(self):
-        """Music transcribed as 'Russian' with weak confidence is noise."""
+    def test_low_language_confidence_dropped_when_long(self):
+        """Given seconds of audio the detector has no excuse — weak
+        confidence there really does mean noise."""
         vl, results = make_listener(
             StubTranscriber("что то там", lang="ru", prob=0.3))
-        vl._handle_utterance(loud_audio())
+        vl._handle_utterance(loud_audio(4.0))
+        assert results == []
+
+    def test_short_low_confidence_is_kept(self):
+        """The regression this whole path exists for: real in-game calls
+        are short, and lang_prob is unreliable on short audio. Dropping
+        these lost the most useful messages."""
+        vl, results = make_listener(
+            StubTranscriber("беги", lang="ru", prob=0.3))
+        vl._handle_utterance(loud_audio(1.2))
+        assert len(results) == 1
+
+    def test_short_noise_dropped_by_no_speech_prob(self):
+        """Short clips lean on no_speech_prob instead of lang_prob, so
+        music that transcribes to Cyrillic is still rejected."""
+        vl, results = make_listener(
+            StubTranscriber("что то там", lang="ru", prob=0.3,
+                            no_speech=0.95))
+        vl._handle_utterance(loud_audio(1.2))
+        assert results == []
+
+    def test_short_english_dropped(self):
+        """Nothing vouches for Latin text on the short path."""
+        vl, results = make_listener(
+            StubTranscriber("first blood", lang="en", prob=0.3))
+        vl._handle_utterance(loud_audio(1.2))
         assert results == []
 
     def test_low_acoustic_confidence_dropped(self):
