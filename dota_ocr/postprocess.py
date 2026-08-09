@@ -100,11 +100,56 @@ def _normalize_colons(text: str) -> str:
     return text
 
 
-def _get_body(text: str) -> str:
-    """Return the message body (after first ':'), or the full text."""
+def _separator_colon(text: str) -> int:
+    """Index of the colon separating the name from the message, or -1.
+
+    Dota lays chat out as `[Channel] Name [Clan] : message`, so the
+    separator is the first colon at bracket depth zero.  Taking the first
+    colon outright is wrong: the clan tag is drawn in the player's colour
+    and OCR regularly mangles it into things like `[:Я В Аи]`, whose
+    colon comes first.  Splitting there drags the garbled name into the
+    body, which then trips the junk-word filter, corrupts the text sent
+    for translation, and leaves stray Cyrillic in the English output.
+
+    An unclosed '[' is treated as closed at the next colon rather than
+    swallowing the rest of the line — OCR drops ']' often enough that
+    refusing to split would lose the message entirely.
+    """
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth = max(0, depth - 1)
+        elif ch == ":" and depth == 0:
+            return i
+    # No depth-0 colon: OCR dropped the closing ']', so every colon looks
+    # like it's inside the tag.  Dota renders the separator spaced (" : ")
+    # whereas the mangled tag's colon runs straight into a character
+    # ("[:Я"), so prefer the first colon followed by whitespace.  Taking
+    # the *first* such colon rather than the last keeps any colons that
+    # belong to the message ("го: сейчас") in the body.
+    for i, ch in enumerate(text):
+        if ch == ":" and (i + 1 >= len(text) or text[i + 1].isspace()):
+            return i
+    return text.find(":")
+
+
+def split_chat_line(text: str) -> tuple[str, str]:
+    """Split a chat line into (prefix_including_colon, message_body).
+
+    Returns ('', full_text) when there is no separator colon.
+    """
     text = _normalize_colons(text)
-    idx = text.find(":")
-    return text[idx + 1:] if idx >= 0 else text
+    idx = _separator_colon(text)
+    if idx < 0:
+        return ("", text.strip())
+    return (text[: idx + 1].strip(), text[idx + 1:].strip())
+
+
+def _get_body(text: str) -> str:
+    """Return the message body, or the full text when there's no colon."""
+    return split_chat_line(text)[1] if ":" in _normalize_colons(text) else text
 
 
 import re

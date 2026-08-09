@@ -163,7 +163,10 @@ from dota_ocr.dedup import MessageDeduplicator
 from dota_ocr.dpi import enable_dpi_awareness
 from dota_ocr.ocr import OCRReader
 from dota_ocr.overlay import Overlay
-from dota_ocr.postprocess import has_cyrillic, is_chat_line, normalize_colons, normalize_cyrillic
+from dota_ocr.postprocess import (
+    has_cyrillic, is_chat_line, normalize_colons, normalize_cyrillic,
+    split_chat_line,
+)
 from dota_ocr.translator import Translator
 from dota_ocr import history, glossary
 
@@ -190,19 +193,9 @@ def load_config() -> dict:
         return json.load(f)
 
 
-def split_chat_line(text: str) -> tuple[str, str]:
-    """Split '[Tag] Name [Sub]: message body' into (prefix, body).
-
-    Returns (prefix_with_colon, body). If no colon found, returns
-    ('', full_text).
-    """
-    text = normalize_colons(text)
-    idx = text.find(":")
-    if idx < 0:
-        return ("", text.strip())
-    prefix = text[: idx + 1].strip()
-    body = text[idx + 1 :].strip()
-    return (prefix, body)
+# split_chat_line lives in postprocess so the junk filter and the
+# translator agree on where the message body starts. They used to
+# disagree, and OCR-mangled clan tags landed in the body of both.
 
 
 def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
@@ -405,7 +398,11 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
             # lowercase.  OCR garbage tends to be 1-char tokens with
             # random caps like "CABP moa> LEI ise".
             import re as _re
-            body_only = text.split(":", 1)[1] if ":" in text else text
+            # Judge the message only. Splitting on the first ':' used to
+            # include the OCR-mangled clan tag ('[:Я В Аи]'), whose
+            # one-character fragments pushed real messages over the junk
+            # threshold and silently dropped them.
+            body_only = split_chat_line(text)[1] or text
             words = _re.findall(r"[^\s]+", body_only)
             if len(words) >= 3:
                 short = sum(1 for w in words if len(w) == 1)
