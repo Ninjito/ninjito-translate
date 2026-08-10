@@ -408,6 +408,63 @@ class TestTranscriberDeviceFallback:
 # duplicate suppression
 # --------------------------------------------------------------------------
 
+class TestDeviceFollowing:
+    """Switching headphones mid-match silently killed voice.
+
+    The capture device was resolved once at startup. Moving Windows'
+    default output to a headset (or a wireless headset waking up after
+    the app launched) left the stream bound to the old device, which
+    keeps returning silence rather than erroring -- so the reopen-on-
+    error path never fired and nothing indicated anything was wrong.
+    """
+
+    def _devices(self, default_name):
+        return [
+            {"index": 13, "name": "Speakers (HyperX Cloud III S) [Loopback]",
+             "rate": 48000, "channels": 2,
+             "is_default": default_name == "hyperx"},
+            {"index": 14, "name": "Speakers (Realtek HD Audio) [Loopback]",
+             "rate": 48000, "channels": 2,
+             "is_default": default_name == "realtek"},
+        ]
+
+    def test_switches_when_default_output_changes(self):
+        """The reported bug: default moved to the headset."""
+        target = voice.should_switch_device(
+            "Speakers (Realtek HD Audio) [Loopback]",
+            self._devices("hyperx"))
+        assert target is not None
+        assert "HyperX" in target["name"]
+
+    def test_stays_when_already_on_default(self):
+        assert voice.should_switch_device(
+            "Speakers (HyperX Cloud III S) [Loopback]",
+            self._devices("hyperx")) is None
+
+    def test_pinned_device_is_not_overridden_by_default(self):
+        """An explicit choice in Settings outranks the Windows default."""
+        assert voice.should_switch_device(
+            "Speakers (Realtek HD Audio) [Loopback]",
+            self._devices("hyperx"),
+            want_name="Speakers (Realtek HD Audio) [Loopback]") is None
+
+    def test_returns_to_pinned_device_when_it_reappears(self):
+        """A sleeping wireless headset drops out of enumeration entirely;
+        when it wakes we must go back to it."""
+        target = voice.should_switch_device(
+            "Speakers (Realtek HD Audio) [Loopback]",
+            self._devices("realtek"),
+            want_name="Speakers (HyperX Cloud III S) [Loopback]")
+        assert target is not None and "HyperX" in target["name"]
+
+    def test_no_devices_means_stay_put(self):
+        assert voice.should_switch_device("anything", []) is None
+
+    def test_unknown_current_device_switches_to_default(self):
+        target = voice.should_switch_device("", self._devices("hyperx"))
+        assert target is not None and "HyperX" in target["name"]
+
+
 class TestShortUtteranceAcceptance:
     """Short calls ("беги", "стой", "мид") were being dropped wholesale.
 

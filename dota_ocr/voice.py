@@ -66,6 +66,9 @@ CUDA_RUNTIME_DLLS = ("cublas64_12.dll", "cudnn64_9.dll")
 SHORT_UTTERANCE_SEC = 2.0
 MAX_NO_SPEECH_PROB = 0.6   # the model's own "this isn't speech" signal
 
+# How often capture re-checks which output device it should be on.
+DEVICE_POLL_SEC = 3.0
+
 MIN_UTTERANCE_SEC = 0.25   # shorter than this is a click/blip, not speech
 MAX_UTTERANCE_SEC = 12.0   # force a cut so long rants still get translated
 SILENCE_HANGOVER_SEC = 0.7 # trailing silence that ends an utterance
@@ -135,6 +138,24 @@ def list_loopback_devices() -> list[dict]:
             except Exception:
                 pass
     return out
+
+
+def should_switch_device(current_name: str, devices: list[dict],
+                         want_name: str = "",
+                         want_index: int | None = None) -> dict | None:
+    """Return the device capture should move to, or None to stay put.
+
+    Players change output mid-match constantly — plugging in a headset,
+    or a wireless one waking from sleep and re-entering enumeration. The
+    old device does not error when this happens; its loopback just goes
+    quiet, so nothing detects the problem and voice appears dead.
+    """
+    if not devices:
+        return None
+    target = pick_device(devices, want_name, want_index)
+    if target is None or target["name"] == current_name:
+        return None
+    return target
 
 
 REJECT_LANG = "lang"
@@ -804,6 +825,8 @@ class VoiceListener:
                     input_device_index=int(dev["index"]),
                 )
                 segmenter.reset()
+                self.device_name = dev["name"]
+                next_check = time.monotonic() + DEVICE_POLL_SEC
 
                 while not self._stop.is_set():
                     raw = stream.read(chunk, exception_on_overflow=False)
@@ -812,6 +835,29 @@ class VoiceListener:
                     mono = self._to_mono_16k(raw, channels, rate)
                     for utt in segmenter.feed(mono):
                         self._enqueue(utt)
+
+                    # Follow the output device. A switch produces no error
+                    # — the old loopback simply goes silent — so polling is
+                    # the only way to notice.
+                    now = time.monotonic()
+                    if now >= next_check:
+                        next_check = now + DEVICE_POLL_SEC
+                        v = self._vcfg()
+                        try:
+                            target = should_switch_device(
+                                dev["name"], list_loopback_devices(),
+                                want_name=str(v.get("device_name", "") or ""),
+                                want_index=v.get("device_index"),
+                            )
+                        except Exception:
+                            target = None
+                        if target is not None:
+                            print(f"[voice] output device changed -> "
+                                  f"{target['name']!r}", flush=True)
+                            self._status("Voice: switched audio device",
+                                         "#7bd88f")
+                            dev = target
+                            break      # reopen on the new device
 
             except Exception as e:
                 if self._stop.is_set():
