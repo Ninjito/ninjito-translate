@@ -112,13 +112,25 @@ class TestRejection:
         vl._handle_utterance(loud_audio())
         assert results == []
 
-    def test_low_language_confidence_dropped_when_long(self):
-        """Given seconds of audio the detector has no excuse — weak
-        confidence there really does mean noise."""
+    def test_long_noise_dropped_by_no_speech_prob(self):
+        """no_speech_prob carries noise rejection at every length now.
+
+        The language label used to do this job, but on game-mixed audio
+        it mislabels real Russian (a genuine call came back as en(0.23)),
+        so it only ever vetoed teammates. Non-Cyrillic text is rejected
+        separately, which is what actually catches English game audio."""
         vl, results = make_listener(
-            StubTranscriber("что то там", lang="ru", prob=0.3))
+            StubTranscriber("что то там", lang="ru", prob=0.3,
+                            no_speech=0.9))
         vl._handle_utterance(loud_audio(4.0))
         assert results == []
+
+    def test_long_russian_with_weak_language_label_is_kept(self):
+        vl, results = make_listener(
+            StubTranscriber("они идут на рошана", lang="en", prob=0.23,
+                            no_speech=0.05))
+        vl._handle_utterance(loud_audio(4.0))
+        assert len(results) == 1
 
     def test_short_low_confidence_is_kept(self):
         """The regression this whole path exists for: real in-game calls

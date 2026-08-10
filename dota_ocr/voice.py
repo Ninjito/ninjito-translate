@@ -86,8 +86,23 @@ PREROLL_SEC = 0.3          # audio kept from *before* speech was detected
 # *when to bother running Whisper*, and Whisper's own Silero VAD makes the
 # real speech/non-speech call.
 NOISE_FLOOR_ALPHA = 0.995  # slow adaptation of the background level
-SPEECH_FACTOR = 3.0        # frame must be this much louder than the floor
+SPEECH_FACTOR = 1.8        # frame must be this much louder than the floor
 ABS_SILENCE_RMS = 0.004    # ...and above this absolute level, always
+
+# Ceiling on the adaptive noise floor.
+#
+# Loopback carries teammates' voices mixed with Dota's music and spell
+# effects, and voice arrives at roughly the same level as that
+# background rather than above it. Without a ceiling the floor tracks the
+# game audio upward and the gate then demands speech be louder than the
+# game -- so a whole match produced 19 utterances, nearly all explosions
+# and shouting, and one usable line.
+#
+# The segmenter only needs recall. Whisper's own Silero VAD, the language
+# check, the Cyrillic check and no_speech_prob all reject non-speech
+# afterwards; letting some game audio through costs CPU, whereas
+# gating it out loses the message entirely.
+NOISE_FLOOR_MAX = 0.02
 
 
 def _app_dir() -> Path:
@@ -183,8 +198,8 @@ REJECT_NOT_SPEECH = "notspeech"
 
 def accept_utterance(text: str, lang: str, lang_prob: float, avg_lp: float,
                      no_speech_prob: float, duration_sec: float, *,
-                     lang_prob_min: float = 0.6,
-                     min_avg_logprob: float = -1.0,
+                     lang_prob_min: float = 0.5,
+                     min_avg_logprob: float = -1.3,
                      short_sec: float = SHORT_UTTERANCE_SEC,
                      max_no_speech: float = MAX_NO_SPEECH_PROB) -> str:
     """Decide whether a transcription is a real Russian call.
@@ -193,6 +208,13 @@ def accept_utterance(text: str, lang: str, lang_prob: float, avg_lp: float,
 
     Long utterances are gated on Whisper's detected language, which is
     reliable once it has a couple of seconds to work with.
+
+    The language and confidence floors are deliberately loose. Game audio
+    mixed into the same stream garbles the transcript, so genuine calls
+    come back at ru(0.56) or avg_logprob -1.14 -- tight floors dropped
+    real teammates while no_speech_prob said plainly it was speech. That
+    check now runs at every length and carries the noise rejection, so
+    these two only need to catch the clearly-wrong cases.
 
     Short ones are not: language_probability drops with duration, so the
     same 0.60 floor that correctly rejects English rejects "беги" too,
@@ -215,16 +237,21 @@ def accept_utterance(text: str, lang: str, lang_prob: float, avg_lp: float,
     if reason:
         return reason
 
-    if duration_sec > short_sec:
-        if lang != "ru" or lang_prob < lang_prob_min:
-            return REJECT_LANG
-        return ""
-
-    # Short: the script of the text is the trustworthy signal.
+    # The model's own "this isn't speech" verdict applies at every length.
+    # It used to be consulted only for short clips, which let a long
+    # stretch of game audio through on the strength of its language score
+    # alone -- and now that the segmenter favours recall, far more game
+    # audio reaches this point.
     if no_speech_prob > max_no_speech:
         return REJECT_NOT_SPEECH
-    if not has_cyrillic(stripped):
-        return REJECT_NO_CYRILLIC
+
+    # No language gate. _reject_reason above already requires Cyrillic at
+    # every length, so anything reaching here is Cyrillic -- and Whisper's
+    # language label on game-mixed audio is unreliable enough that it only
+    # ever rejected real Russian ('Опфи заводи.' came back as en(0.23)).
+    # Script plus no_speech_prob are the signals that actually hold up;
+    # every genuine English line in testing was caught by the Cyrillic
+    # check, never by the language label.
     return ""
 
 
@@ -367,14 +394,21 @@ class VadSegmenter:
 
         for frame in frames:
             rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))
+            # Cap at the point of use, not just on update: a floor that
+            # has already climbed above the ceiling would otherwise go on
+            # vetoing speech indefinitely.
+            floor = min(self._noise_floor, NOISE_FLOOR_MAX)
             is_speech = (rms > ABS_SILENCE_RMS
-                         and rms > self._noise_floor * SPEECH_FACTOR)
+                         and rms > floor * SPEECH_FACTOR)
 
             # Only quiet frames update the floor, otherwise loud continuous
             # speech would drag the threshold up above itself.
             if not is_speech:
-                self._noise_floor = (NOISE_FLOOR_ALPHA * self._noise_floor
-                                     + (1.0 - NOISE_FLOOR_ALPHA) * rms)
+                self._noise_floor = min(
+                    NOISE_FLOOR_MAX,
+                    NOISE_FLOOR_ALPHA * self._noise_floor
+                    + (1.0 - NOISE_FLOOR_ALPHA) * rms,
+                )
 
             if is_speech:
                 if not self._in_speech:
@@ -702,8 +736,12 @@ class Transcriber:
 # Listener
 # ---------------------------------------------------------------------------
 
+# Deliberately no "Dota 2" here. Whisper regurgitates prompt text when
+# fed non-speech, and with that phrase present the log filled with
+# 'Dota 2. Dota 2. Dota 2. ...' echoes at no_speech_prob 0.8+. Only the
+# in-game vocabulary remains, which is what actually helps recognition.
 DEFAULT_PROMPT = (
-    "Разговор игроков в Dota 2: мид, лес, руна, вард, рошан, "
+    "Игроки говорят: мид, лес, руна, вард, рошан, "
     "гангк, пуш, отступаем, атакуем, бараки."
 )
 

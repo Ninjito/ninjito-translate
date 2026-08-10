@@ -408,6 +408,42 @@ class TestTranscriberDeviceFallback:
 # duplicate suppression
 # --------------------------------------------------------------------------
 
+class TestGateHearsSpeechOverGameAudio:
+    """Teammates went untranslated for a whole match: 19 utterances total,
+    nearly all loud SFX, one accepted line.
+
+    Loopback carries voice mixed with Dota's music and spell effects at a
+    similar level. The old gate demanded a frame be SPEECH_FACTOR=3x above
+    an adaptive noise floor that game audio had already dragged upward, so
+    ordinary speech never opened it -- only shouting and explosions did.
+    The segmenter only needs recall; Whisper's Silero VAD, the language
+    check and no_speech_prob reject the rest downstream.
+    """
+
+    def test_speech_detected_once_floor_has_risen_to_game_level(self):
+        """The reported failure, stated directly: sustained game audio has
+        already pushed the floor to its own level, and normal-volume voice
+        arrives at roughly that level rather than 3x above it."""
+        seg = VadSegmenter()
+        seg._noise_floor = 0.07                 # where a match leaves it
+        out = seg.feed(tone(1.5, freq=300, amp=0.15))
+        out += seg.feed(silence(1.5))
+        assert out, "normal-volume speech must open the gate"
+
+    def test_floor_is_capped_when_used(self):
+        """Capping only on update would leave a floor that had already
+        climbed above the cap still suppressing speech."""
+        seg = VadSegmenter()
+        seg._noise_floor = 0.5                  # absurdly high
+        out = seg.feed(tone(1.5, freq=300, amp=0.15))
+        out += seg.feed(silence(1.5))
+        assert out, "an already-high floor must not veto speech forever"
+
+    def test_true_silence_still_yields_nothing(self):
+        seg = VadSegmenter()
+        assert seg.feed(silence(3.0)) == []
+
+
 class TestDeviceFollowing:
     """Switching headphones mid-match silently killed voice.
 
@@ -503,9 +539,14 @@ class TestShortUtteranceAcceptance:
         assert self.accept(text="беги", lang="ru", lang_prob=0.34,
                            avg_lp=-0.79, duration_sec=self.SHORT) == ""
 
-    def test_long_russian_still_needs_lang_prob(self):
-        """Length means the detector had enough signal; keep trusting it."""
-        assert self.accept(lang_prob=0.34, duration_sec=self.LONG) != ""
+    def test_long_cyrillic_survives_a_wrong_language_label(self):
+        """Whisper labelled the real Russian 'Опфи заводи.' as en(0.23).
+        On game-mixed audio the language label is unreliable, while the
+        script is not -- and non-Cyrillic text is already rejected before
+        this point, so the label can only ever veto genuine Russian."""
+        assert self.accept(text="опфи заводи", lang="en", lang_prob=0.23,
+                           avg_lp=-0.6, no_speech_prob=0.1,
+                           duration_sec=self.LONG) == ""
 
     # --- short clips must not become a free-for-all ----------------------
     def test_short_latin_text_rejected(self):
@@ -538,6 +579,24 @@ class TestShortUtteranceAcceptance:
 
     def test_long_poor_confidence_rejected(self):
         assert self.accept(avg_lp=-1.5) != ""
+
+    def test_marginal_but_clearly_speech_russian_is_kept(self):
+        """Captured live: real teammates dropped by a hair. Game audio
+        garbles the transcript, so a genuine call scores ru(0.56) or
+        lp=-1.14 while no_speech_prob says plainly it is speech. A
+        garbled translation beats none."""
+        assert self.accept(text="они у нас проходят возле дерева",
+                           lang="ru", lang_prob=0.56, avg_lp=-0.5,
+                           no_speech_prob=0.07) == ""
+        assert self.accept(text="рева летим чаем а и вы видели",
+                           lang="ru", lang_prob=0.78, avg_lp=-1.14,
+                           no_speech_prob=0.02) == ""
+
+    def test_noise_is_still_rejected_by_no_speech_prob(self):
+        """Loosening those two must not open the door to game audio --
+        no_speech_prob is what now carries that weight, at every length."""
+        assert self.accept(text="что то там", lang="ru", lang_prob=0.9,
+                           avg_lp=-0.5, no_speech_prob=0.85) != ""
 
     def test_reason_is_reported_for_logging(self):
         reason = self.accept(text="go go go", lang="en", lang_prob=0.98)
