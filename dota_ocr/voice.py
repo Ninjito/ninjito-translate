@@ -70,7 +70,15 @@ MAX_NO_SPEECH_PROB = 0.6   # the model's own "this isn't speech" signal
 DEVICE_POLL_SEC = 3.0
 
 MIN_UTTERANCE_SEC = 0.25   # shorter than this is a click/blip, not speech
-MAX_UTTERANCE_SEC = 12.0   # force a cut so long rants still get translated
+# Force a cut after this much continuous speech. This is the dominant
+# source of latency, not transcription: Dota's game audio keeps the VAD
+# gate open, so utterances rarely close on silence and instead run to
+# this cap before anything is transcribed. At 12s a call spoken early in
+# the window landed ~15s late. Transcription costs a flat ~2.7s on CPU
+# regardless of clip length, so shorter chunks arrive sooner at the same
+# cost per chunk — 5s keeps the worst case near 8s while leaving the
+# process thread comfortably ahead of the audio.
+MAX_UTTERANCE_SEC = 5.0
 SILENCE_HANGOVER_SEC = 0.7 # trailing silence that ends an utterance
 PREROLL_SEC = 0.3          # audio kept from *before* speech was detected
 
@@ -816,7 +824,13 @@ class VoiceListener:
         """
         import pyaudiowpatch as pyaudio
 
-        segmenter = VadSegmenter()
+        # Configurable because it trades latency against transcription
+        # accuracy: shorter chunks reach the overlay sooner but give
+        # Whisper less context to work with.
+        segmenter = VadSegmenter(
+            max_sec=float(self._vcfg().get("max_utterance_sec",
+                                           MAX_UTTERANCE_SEC))
+        )
         chunk = 1024
 
         while not self._stop.is_set():

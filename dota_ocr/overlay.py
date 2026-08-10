@@ -14,6 +14,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
@@ -245,7 +246,8 @@ class Overlay:
         self.max_messages = max_messages
         self._msg_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
         self._trigger_event = threading.Event()
-        self._messages: list[tuple[str, str]] = []
+        # (original, translated, shown_at) — the timestamp drives expiry.
+        self._messages: list[tuple[str, str, float]] = []
         self._alpha = max(0.15, min(1.0, alpha))
         self._on_recalibrate = on_recalibrate
         self._on_hotkey_changed = on_hotkey_changed
@@ -1713,16 +1715,27 @@ class Overlay:
         self._paste_to_dota_chat(text, all_chat=False)
 
     def _drain(self) -> None:
-        drained = False
+        dirty = False
+        now = time.monotonic()
         try:
             while True:
                 orig, trans = self._msg_queue.get_nowait()
-                self._messages.append((orig, trans))
-                drained = True
+                self._messages.append((orig, trans, now))
+                dirty = True
         except queue.Empty:
             pass
 
-        if drained:
+        # Expire old lines. Voice arrives on its own schedule and is never
+        # part of an OCR batch, so without this it would pile up on screen
+        # for the rest of the match. 0 disables expiry.
+        ttl = float((self._cfg or {}).get("message_ttl_sec", 7) or 0)
+        if ttl > 0 and self._messages:
+            live = [m for m in self._messages if now - m[2] < ttl]
+            if len(live) != len(self._messages):
+                self._messages = live
+                dirty = True
+
+        if dirty:
             if len(self._messages) > self.max_messages:
                 self._messages = self._messages[-self.max_messages:]
             self._render()
@@ -1735,7 +1748,7 @@ class Overlay:
         self.text.delete("1.0", "end")
         # Only keep the last 5 translations on screen — no source line,
         # just the translated text, channel-colored.
-        for orig, trans in self._messages[-5:]:
+        for orig, trans, _ts in self._messages[-5:]:
             tag = "all"
             orig_lower = orig.lower()
             if self._is_voice(orig):
@@ -2306,6 +2319,8 @@ class Overlay:
             "auto_ocr_interval_sec": int((self._cfg or {}).get("auto_ocr_interval_sec", 5)),
             "auto_translate_on_chat": bool((self._cfg or {}).get("auto_translate_on_chat", False)),
             "dota_chat_key": str((self._cfg or {}).get("dota_chat_key", "Return")),
+            # Seconds a translation stays on the overlay; 0 = keep forever.
+            "message_ttl_sec": int((self._cfg or {}).get("message_ttl_sec", 7)),
         }
         for k, v in scalar_defaults.items():
             if k not in data:
@@ -2332,6 +2347,9 @@ class Overlay:
             # it to catch more short calls, lower it if noise gets in.
             "short_utterance_sec": 2.0,
             "max_no_speech_prob": 0.6,
+            # Latency knob: how long continuous speech is buffered before
+            # it is cut and transcribed. Lower = faster, less context.
+            "max_utterance_sec": 5.0,
             "use_dota_prompt": True,
         }
         cur_voice = dict(data.get("voice") or {})
