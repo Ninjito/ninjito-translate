@@ -142,18 +142,28 @@ def list_loopback_devices() -> list[dict]:
 
 def should_switch_device(current_name: str, devices: list[dict],
                          want_name: str = "",
-                         want_index: int | None = None) -> dict | None:
+                         want_index: int | None = None,
+                         current_index: int | None = None) -> dict | None:
     """Return the device capture should move to, or None to stay put.
 
     Players change output mid-match constantly — plugging in a headset,
     or a wireless one waking from sleep and re-entering enumeration. The
     old device does not error when this happens; its loopback just goes
     quiet, so nothing detects the problem and voice appears dead.
+
+    The index is compared as well as the name: Windows reassigns indices
+    on every re-enumeration, so the same device can come back under a new
+    one.  Matching on name alone would keep the old index, which by then
+    may point at a completely different device.
     """
     if not devices:
         return None
     target = pick_device(devices, want_name, want_index)
-    if target is None or target["name"] == current_name:
+    if target is None:
+        return None
+    if target["name"] == current_name and (
+        current_index is None or target["index"] == current_index
+    ):
         return None
     return target
 
@@ -848,6 +858,7 @@ class VoiceListener:
                                 dev["name"], list_loopback_devices(),
                                 want_name=str(v.get("device_name", "") or ""),
                                 want_index=v.get("device_index"),
+                                current_index=int(dev["index"]),
                             )
                         except Exception:
                             target = None
@@ -866,6 +877,32 @@ class VoiceListener:
                 print(f"[voice] capture error: {e} — reopening in 2s", flush=True)
                 self._status("Voice: audio device error", "#ff8844")
                 time.sleep(2.0)
+                # The device may be gone for good (headset powered off),
+                # in which case its index is dead and retrying it would
+                # loop forever.  Re-resolve so we land on whatever output
+                # actually exists now.
+                #
+                # Adopt the fresh entry whenever anything differs, not
+                # just the index: PortAudio indices are positional, so
+                # removing a device shifts the others down and a
+                # *different* device commonly inherits the dead index.
+                # Keeping the old dict would then reopen that index with
+                # the previous device's rate and channel count.
+                try:
+                    v = self._vcfg()
+                    fresh = pick_device(
+                        list_loopback_devices(),
+                        str(v.get("device_name", "") or ""),
+                        v.get("device_index"),
+                    )
+                    if fresh is not None and fresh != dev:
+                        print(f"[voice] retrying on {fresh['name']!r} "
+                              f"(index {fresh['index']}, "
+                              f"{fresh['rate']}Hz x{fresh['channels']})",
+                              flush=True)
+                        dev = fresh
+                except Exception:
+                    pass
             finally:
                 for closer in (
                     lambda: stream.stop_stream() if stream else None,

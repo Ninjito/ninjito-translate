@@ -1117,8 +1117,25 @@ class Overlay:
         return fired
 
     def set_status(self, text: str, color: str = "#555") -> None:
+        """Update the status line from any thread.
+
+        The OCR worker and the voice capture/process threads all call
+        this. Tk widgets may only be touched from the thread running
+        mainloop — doing it elsewhere can raise "main thread is not in
+        main loop", corrupt Tk's state, or deadlock the UI — so calls
+        from other threads are marshalled through root.after.
+        """
+        def _apply():
+            try:
+                self._status.configure(text=text, fg=color)
+            except Exception:
+                pass
+
+        if threading.current_thread() is threading.main_thread():
+            _apply()
+            return
         try:
-            self._status.configure(text=text, fg=color)
+            self.root.after(0, _apply)
         except Exception:
             pass
 

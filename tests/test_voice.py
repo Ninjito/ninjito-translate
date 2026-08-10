@@ -457,6 +457,17 @@ class TestDeviceFollowing:
             want_name="Speakers (HyperX Cloud III S) [Loopback]")
         assert target is not None and "HyperX" in target["name"]
 
+    def test_switches_when_same_name_gets_a_new_index(self):
+        """Windows reassigns indices on re-enumeration, so the same device
+        can return under a different one. Matching on name alone would
+        keep the old index, which by then points somewhere else."""
+        devices = self._devices("hyperx")
+        devices[0]["index"] = 15               # headset came back renumbered
+        target = voice.should_switch_device(
+            "Speakers (HyperX Cloud III S) [Loopback]", devices,
+            current_index=13)
+        assert target is not None and target["index"] == 15
+
     def test_no_devices_means_stay_put(self):
         assert voice.should_switch_device("anything", []) is None
 
