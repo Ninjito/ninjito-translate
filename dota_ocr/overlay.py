@@ -1898,11 +1898,16 @@ class Overlay:
         tab_hk = tk.Frame(nb, bg="#0a0a0a")
         tab_cap = tk.Frame(nb, bg="#0a0a0a")
         tab_voice = tk.Frame(nb, bg="#0a0a0a")
+        tab_sug = tk.Frame(nb, bg="#0a0a0a")
         tab_thm = tk.Frame(nb, bg="#0a0a0a")
         nb.add(tab_hk,  text="Hotkeys")
         nb.add(tab_cap, text="Capture")
         nb.add(tab_voice, text="Voice")
+        nb.add(tab_sug, text="Suggest")
         nb.add(tab_thm, text="Theme")
+
+        # ── Suggest tab ───────────────────────────────────────────────
+        self._build_suggest_tab(tab_sug)
 
         # ── Hotkeys tab ───────────────────────────────────────────────
         tk.Label(tab_hk, text="Click a hotkey to rebind it.",
@@ -2234,6 +2239,89 @@ class Overlay:
                 pass
         win.after(50, lambda: threading.Thread(
             target=_settings_grab, daemon=True).start())
+
+    # ---- Suggest tab ----
+
+    def _build_suggest_tab(self, parent) -> None:
+        """Toggles for the live typing suggestions in Dota's chat box."""
+        tk.Label(parent,
+                 text="Suggestions while you type in Dota's chat box.",
+                 bg="#0a0a0a", fg="#bbbbbb", font=("Consolas", 9)
+                 ).pack(anchor="w", padx=10, pady=(10, 2))
+        tk.Label(parent,
+                 text="↑ select    ← → switch    Tab insert    Esc close",
+                 bg="#0a0a0a", fg="#777777", font=("Consolas", 8)
+                 ).pack(anchor="w", padx=10, pady=(0, 8))
+
+        rows = [
+            ("enabled", "Enable suggestions"),
+            ("fix_word", "Fix the word I'm typing"),
+            ("complete_word", "Complete the word"),
+            ("fix_sentence", "Fix the whole sentence's grammar"),
+            ("translate_live", "Translate my line to English as I type"),
+        ]
+        current = dict((self._cfg or {}).get("suggest") or {})
+        for key, label in rows:
+            default = False if key == "translate_live" else True
+            var = tk.BooleanVar(value=bool(current.get(key, default)))
+            tk.Checkbutton(
+                parent, text=label, variable=var,
+                command=lambda k=key, v=var: self._set_suggest_cfg(
+                    k, bool(v.get())),
+                bg="#0a0a0a", fg="#e0e0e0", selectcolor="#1a1a1a",
+                activebackground="#0a0a0a", activeforeground="#ffd84a",
+                font=("Consolas", 9), anchor="w", borderwidth=0,
+                highlightthickness=0,
+            ).pack(anchor="w", padx=16, pady=2)
+
+        tk.Label(parent,
+                 text="Sentence grammar needs internet; word fixes work offline.",
+                 bg="#0a0a0a", fg="#777777", font=("Consolas", 8)
+                 ).pack(anchor="w", padx=10, pady=(10, 2))
+
+        self._suggest_status = tk.Label(
+            parent, text="", bg="#0a0a0a", fg="#7bd88f",
+            font=("Consolas", 8))
+        self._suggest_status.pack(anchor="w", padx=10, pady=(2, 0))
+        self._refresh_suggest_status()
+
+    def _refresh_suggest_status(self) -> None:
+        lbl = getattr(self, "_suggest_status", None)
+        if lbl is None:
+            return
+        ctrl = getattr(self, "_suggest_controller", None)
+        try:
+            if ctrl is None:
+                lbl.config(text="not started", fg="#777777")
+            elif ctrl.is_running():
+                lbl.config(text="keyboard hook active ✓", fg="#7bd88f")
+            else:
+                lbl.config(text=f"inactive: {ctrl.last_error}", fg="#ff6b6b")
+        except Exception:
+            pass
+
+    def _set_suggest_cfg(self, key: str, value) -> None:
+        """Persist one suggest option and restart the hook if needed.
+
+        The controller reads the same dict live, so per-feature toggles
+        take effect on the next keystroke; only 'enabled' has to start
+        or stop the keyboard hook.
+        """
+        block = dict((self._cfg or {}).get("suggest") or {})
+        block[key] = value
+        self._set_cfg("suggest", block)
+        ctrl = getattr(self, "_suggest_controller", None)
+        if ctrl is None:
+            return
+        if key == "enabled":
+            try:
+                if value:
+                    ctrl.start()
+                else:
+                    ctrl.stop()
+            except Exception as e:
+                print(f"[suggest] toggle failed: {e}", flush=True)
+        self._refresh_suggest_status()
 
     def _settings_voice_enable(self, var) -> None:
         """Settings-tab checkbox handler.

@@ -119,7 +119,21 @@ def _cfg(**over):
     return {"suggest": base}
 
 
-def _make(cfg=None, grammar=None):
+class FakeForeground:
+    """Stands in for the Dota-has-focus check."""
+
+    def __init__(self, value=True):
+        self.value = value
+        self.refreshed = 0
+
+    def refresh(self):
+        self.refreshed += 1
+
+    def __call__(self):
+        return self.value
+
+
+def _make(cfg=None, grammar=None, foreground=None):
     popup = FakePopup()
     typer = FakeTyper()
     ctrl = SuggestController(
@@ -130,6 +144,7 @@ def _make(cfg=None, grammar=None):
         suggester=Suggester(words=WORDS, max_results=3, min_prefix=2),
         grammar=grammar or FakeGrammar(),
         typer_mod=typer,
+        is_dota_foreground=foreground or FakeForeground(),
     )
     return ctrl, popup, typer
 
@@ -168,7 +183,7 @@ class TestLifecycle:
             root=FakeRoot(), cfg=_cfg(), popup=popup,
             hook_factory=lambda **kw: FakeHook(ok=False, **kw),
             suggester=Suggester(words=WORDS), grammar=FakeGrammar(),
-            typer_mod=FakeTyper())
+            typer_mod=FakeTyper(), is_dota_foreground=FakeForeground())
         assert ctrl.start() is False
         assert ctrl.last_error == "boom"
         assert ctrl.is_running() is False
@@ -506,10 +521,70 @@ class TestToggles:
         ctrl = SuggestController(
             root=FakeRoot(), cfg=_cfg(), popup=popup, hook_factory=FakeHook,
             suggester=Suggester(words=WORDS, max_results=2, min_prefix=2),
-            grammar=FakeGrammar(), typer_mod=FakeTyper())
+            grammar=FakeGrammar(), typer_mod=FakeTyper(),
+            is_dota_foreground=FakeForeground())
         _open_chat(ctrl)
         _ch(ctrl, "mi")
         assert len(popup.items) <= 2
+
+
+class TestForegroundGate:
+    """The hook is global, so everything must be gated on Dota focus."""
+
+    def test_nothing_is_captured_when_dota_is_not_focused(self):
+        fg = FakeForeground(value=False)
+        ctrl, popup, _ = _make(foreground=fg)
+        _open_chat(ctrl)
+        _ch(ctrl, "mi")
+        assert ctrl.session.is_open is False
+        assert ctrl.buffer.text == ""
+        assert popup.visible is False
+
+    def test_enter_in_another_app_does_not_open_a_session(self):
+        fg = FakeForeground(value=False)
+        ctrl, _, _ = _make(foreground=fg)
+        _open_chat(ctrl)
+        assert ctrl.session.is_open is False
+
+    def test_nav_keys_are_never_swallowed_outside_dota(self):
+        """Otherwise Tab stops working in the user's browser."""
+        fg = FakeForeground(value=True)
+        ctrl, popup, _ = _make(foreground=fg)
+        _open_chat(ctrl)
+        _ch(ctrl, "mi")
+        assert popup.visible is True
+        fg.value = False
+        ev = KeyEvent(vk=VK_TAB, down=True, char="", shift=False,
+                      ctrl=False, alt=False)
+        assert ctrl.should_swallow(ev) is False
+
+    def test_alt_tabbing_away_mid_word_drops_the_session(self):
+        fg = FakeForeground(value=True)
+        ctrl, popup, _ = _make(foreground=fg)
+        _open_chat(ctrl)
+        _ch(ctrl, "mi")
+        fg.value = False
+        _ch(ctrl, "d")
+        assert ctrl.session.is_open is False
+        assert ctrl.buffer.text == ""
+        assert popup.visible is False
+
+    def test_tick_refreshes_the_cached_window_handle(self):
+        fg = FakeForeground(value=True)
+        ctrl, _, _ = _make(foreground=fg)
+        ctrl.tick()
+        assert fg.refreshed == 1
+
+    def test_tick_closes_the_session_when_focus_is_gone(self):
+        fg = FakeForeground(value=True)
+        ctrl, popup, _ = _make(foreground=fg)
+        _open_chat(ctrl)
+        _ch(ctrl, "mi")
+        fg.value = False
+        ctrl.tick()
+        ctrl.pump()
+        assert ctrl.session.is_open is False
+        assert popup.visible is False
 
 
 class TestRecovery:

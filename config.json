@@ -74,6 +74,24 @@
     "compute_type": "int8",
     "lang_prob_min": 0.5,
     "min_avg_logprob": -1.3,
-    "use_dota_prompt": true
-  }
+    "use_dota_prompt": true,
+    "short_utterance_sec": 2.0,
+    "max_no_speech_prob": 0.6,
+    "max_utterance_sec": 5.0
+  },
+  "suggest": {
+    "enabled": true,
+    "fix_word": true,
+    "complete_word": true,
+    "fix_sentence": true,
+    "translate_live": false,
+    "max_results": 3,
+    "min_prefix": 2,
+    "grammar_debounce_ms": 600,
+    "popup": {
+      "x": null,
+      "y": null
+    }
+  },
+  "message_ttl_sec": 7
 }

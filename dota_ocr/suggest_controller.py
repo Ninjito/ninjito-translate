@@ -51,6 +51,40 @@ NAV_KEYS = frozenset({VK_TAB, VK_UP, VK_LEFT, VK_RIGHT, VK_ESCAPE})
 POLL_MS = 30
 
 
+class DotaForeground:
+    """Is Dota the window the user is actually typing into?
+
+    The hook sees every keystroke on the machine, so without this gate
+    pressing Enter in a browser would open a phantom chat session and
+    start swallowing Tab in whatever app the user is really in.
+
+    Split in two on purpose: `refresh` enumerates windows and is called
+    from the Tk heartbeat a couple of times a second, while `__call__`
+    runs inside the hook callback and does nothing but compare two
+    handles.
+    """
+
+    def __init__(self) -> None:
+        self._hwnd = None
+
+    def refresh(self) -> None:
+        try:
+            from dota_ocr.window import find_dota_hwnd
+            self._hwnd = find_dota_hwnd()
+        except Exception:
+            self._hwnd = None
+
+    def __call__(self) -> bool:
+        hwnd = self._hwnd
+        if not hwnd:
+            return False
+        try:
+            import ctypes
+            return ctypes.windll.user32.GetForegroundWindow() == hwnd
+        except Exception:
+            return False
+
+
 class SuggestController:
     def __init__(
         self,
@@ -61,9 +95,12 @@ class SuggestController:
         suggester=None,
         grammar=None,
         typer_mod=None,
+        is_dota_foreground=None,
     ) -> None:
         self.root = root
         self._cfg = cfg or {}
+        self._foreground = (is_dota_foreground if is_dota_foreground
+                            is not None else DotaForeground())
         self.buffer = TypingBuffer()
         self.session = ChatSession(idle_timeout=20.0)
         self.last_error = ""
@@ -172,11 +209,16 @@ class SuggestController:
     def should_swallow(self, ev: KeyEvent) -> bool:
         """Decide, inside the hook callback, whether Dota sees this key.
 
-        Only nav keys, only while a popup is on screen. When none is
-        showing the user is just playing, and stealing Tab there would
-        break the scoreboard.
+        Only nav keys, only while a popup is on screen, only while Dota
+        has focus. When none of that holds the user is just playing — or
+        is in another app entirely — and stealing Tab would break the
+        scoreboard or their alt-tabbed browser.
+
+        The three tests are ordered cheapest-first, so the foreground
+        check costs a syscall on arrow keys alone, never on typing.
         """
-        return ev.vk in NAV_KEYS and self._popup_wanted
+        return (ev.vk in NAV_KEYS and self._popup_wanted
+                and self._foreground())
 
     def handle_event(self, ev: KeyEvent) -> None:
         if not ev.down:
@@ -188,6 +230,14 @@ class SuggestController:
 
     def _handle(self, ev: KeyEvent) -> None:
         now = time.monotonic()
+
+        # The hook is global. Anything typed outside Dota is none of our
+        # business, and must not open a session or reach the buffer.
+        if not self._foreground():
+            if self.session.is_open:
+                self.session.on_foreground_lost()
+                self._reset()
+            return
 
         # Popup navigation comes first: these keys never reach the buffer.
         if self._popup_wanted and ev.vk in NAV_KEYS:
@@ -221,7 +271,20 @@ class SuggestController:
             self._refresh()
 
     def tick(self) -> None:
-        """Run the idle timeout. Called from the owner's heartbeat."""
+        """Heartbeat from the owner, a couple of times a second.
+
+        Refreshes the cached Dota window handle (too slow to look up in
+        the hook callback) and runs the two recovery paths.
+        """
+        refresh = getattr(self._foreground, "refresh", None)
+        if refresh is not None:
+            try:
+                refresh()
+            except Exception:
+                pass
+        if not self._foreground():
+            self.on_foreground_lost()
+            return
         if self.session.tick(now=time.monotonic()):
             self._reset()
 

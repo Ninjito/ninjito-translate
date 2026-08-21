@@ -635,6 +635,41 @@ def main() -> None:
                 pass
         overlay.root.after(600, _resume_voice)
 
+    # --- Live typing suggestions in Dota's chat box ---
+    # Started after the overlay exists because the popup is a Toplevel
+    # of its root, and deferred so loading the 82k-word dictionary can't
+    # delay the window appearing.
+    suggest_holder: dict = {"ctrl": None}
+    if bool((cfg.get("suggest") or {}).get("enabled", True)):
+        def _start_suggest() -> None:
+            try:
+                from dota_ocr.suggest_controller import SuggestController
+                ctrl = SuggestController(overlay.root, cfg)
+                suggest_holder["ctrl"] = ctrl
+                overlay._suggest_controller = ctrl
+                ok = ctrl.start()
+                print(f"[suggest] started={ok} {ctrl.last_error}", flush=True)
+            except Exception as e:
+                print(f"[suggest] start failed: {e}", flush=True)
+                return
+
+            # tick() refreshes the cached Dota window handle and runs
+            # both recovery paths — idle timeout and lost focus. The
+            # handle lookup is too slow for the hook callback, so it
+            # happens here instead.
+            def _beat() -> None:
+                try:
+                    ctrl.tick()
+                except Exception:
+                    pass
+                try:
+                    overlay.root.after(500, _beat)
+                except Exception:
+                    pass
+            overlay.root.after(500, _beat)
+
+        overlay.root.after(900, _start_suggest)
+
     stop_event = threading.Event()
     t = threading.Thread(
         target=_worker_respawn, args=(overlay, cfg, stop_event, shared),
@@ -658,6 +693,12 @@ def main() -> None:
         if listener is not None:
             try:
                 listener.stop()
+            except Exception:
+                pass
+        ctrl = suggest_holder.get("ctrl")
+        if ctrl is not None:
+            try:
+                ctrl.stop()
             except Exception:
                 pass
 
