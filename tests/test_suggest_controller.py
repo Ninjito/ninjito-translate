@@ -23,7 +23,8 @@ import pytest
 from dota_ocr.suggest import Suggester, Suggestion
 from dota_ocr.suggest_controller import SuggestController
 from dota_ocr.typing_buffer import (
-    KeyEvent, VK_RETURN, VK_ESCAPE, VK_TAB, VK_UP, VK_LEFT, VK_RIGHT,
+    KeyEvent, VK_RETURN, VK_ESCAPE, VK_TAB, VK_UP, VK_DOWN,
+    VK_LEFT, VK_RIGHT,
 )
 
 WORDS = {"mid": 600, "middle": 100, "roshan": 250, "push": 500,
@@ -246,7 +247,7 @@ class TestSwallow:
     def test_nav_keys_pass_through_when_nothing_is_showing(self):
         ctrl, _, _ = _make()
         _open_chat(ctrl)
-        for vk in (VK_TAB, VK_UP, VK_LEFT, VK_RIGHT, VK_ESCAPE):
+        for vk in (VK_TAB, VK_UP, VK_DOWN, VK_ESCAPE):
             ev = KeyEvent(vk=vk, down=True, char="", shift=False,
                           ctrl=False, alt=False)
             assert ctrl.should_swallow(ev) is False
@@ -256,7 +257,7 @@ class TestSwallow:
         _open_chat(ctrl)
         _ch(ctrl, "mi")
         assert popup.visible is True
-        for vk in (VK_TAB, VK_UP, VK_LEFT, VK_RIGHT, VK_ESCAPE):
+        for vk in (VK_TAB, VK_UP, VK_DOWN, VK_ESCAPE):
             ev = KeyEvent(vk=vk, down=True, char="", shift=False,
                           ctrl=False, alt=False)
             assert ctrl.should_swallow(ev) is True
@@ -306,32 +307,34 @@ class TestSwallow:
 
 
 class TestSelection:
-    def test_right_moves_forward(self):
+    def test_down_moves_forward(self):
         ctrl, popup, _ = _make()
         _open_chat(ctrl)
         _ch(ctrl, "mi")
-        _vk(ctrl, VK_RIGHT)
+        _vk(ctrl, VK_DOWN)
         assert popup.index == 1
 
-    def test_left_moves_back_and_wraps(self):
-        ctrl, popup, _ = _make()
-        _open_chat(ctrl)
-        _ch(ctrl, "mi")
-        _vk(ctrl, VK_LEFT)
-        assert popup.index == len(popup.items) - 1
-
-    def test_up_moves_back_like_left(self):
+    def test_up_moves_back_and_wraps(self):
         ctrl, popup, _ = _make()
         _open_chat(ctrl)
         _ch(ctrl, "mi")
         _vk(ctrl, VK_UP)
         assert popup.index == len(popup.items) - 1
 
+    def test_down_wraps_at_the_end(self):
+        ctrl, popup, _ = _make()
+        _open_chat(ctrl)
+        _ch(ctrl, "mi")
+        for _ in range(len(popup.items)):
+            _vk(ctrl, VK_DOWN)
+        assert popup.index == 0
+
     def test_nav_keys_never_reach_the_buffer(self):
         ctrl, _, _ = _make()
         _open_chat(ctrl)
         _ch(ctrl, "mi")
-        _vk(ctrl, VK_RIGHT)
+        _vk(ctrl, VK_DOWN)
+        _vk(ctrl, VK_UP)
         assert ctrl.buffer.text == "mi"
 
     def test_escape_hides_popup_but_keeps_chat_open(self):
@@ -372,7 +375,7 @@ class TestAccept:
         ctrl, popup, typer = _make()
         _open_chat(ctrl)
         _ch(ctrl, "mi")
-        _vk(ctrl, VK_RIGHT)
+        _vk(ctrl, VK_DOWN)
         chosen = popup.items[popup.index].text
         _vk(ctrl, VK_TAB)
         assert typer.calls[0] == ("word", 2, chosen)
@@ -526,6 +529,57 @@ class TestToggles:
         _open_chat(ctrl)
         _ch(ctrl, "mi")
         assert len(popup.items) <= 2
+
+
+class TestCaretKeys:
+    """Left and Right belong to the game, not to the popup."""
+
+    def test_left_and_right_are_never_swallowed(self):
+        ctrl, popup, _ = _make()
+        _open_chat(ctrl)
+        _ch(ctrl, "mi")
+        assert popup.visible is True
+        for vk in (VK_LEFT, VK_RIGHT):
+            ev = KeyEvent(vk=vk, down=True, char="", shift=False,
+                          ctrl=False, alt=False)
+            assert ctrl.should_swallow(ev) is False
+
+    def test_left_and_right_do_not_change_the_selection(self):
+        ctrl, popup, _ = _make()
+        _open_chat(ctrl)
+        _ch(ctrl, "mi")
+        _vk(ctrl, VK_LEFT)
+        _vk(ctrl, VK_RIGHT)
+        assert popup.index == 0
+
+    def test_the_caret_still_moves(self):
+        ctrl, _, _ = _make()
+        _open_chat(ctrl)
+        _ch(ctrl, "mi")
+        _vk(ctrl, VK_LEFT)
+        assert ctrl.buffer.cursor == 1
+        assert ctrl.buffer.text == "mi"
+
+    def test_walking_back_into_a_word_resuggests_for_it(self):
+        """Suggestions must follow the caret, not the last keypress."""
+        ctrl, popup, _ = _make()
+        _open_chat(ctrl)
+        _ch(ctrl, "push mi")
+        assert "middle" in [s.text for s in popup.items]
+        # Step the caret back over "mi" and the space, into "push".
+        for _ in range(3):
+            _vk(ctrl, VK_LEFT)
+        assert ctrl.buffer.current_word()[0] == "push"
+        assert "middle" not in [s.text for s in popup.items]
+
+    def test_caret_leaving_a_word_hides_the_popup(self):
+        ctrl, popup, _ = _make()
+        _open_chat(ctrl)
+        _ch(ctrl, "mi")
+        _vk(ctrl, VK_LEFT)
+        _vk(ctrl, VK_LEFT)
+        assert ctrl.buffer.cursor == 0
+        assert popup.visible is False
 
 
 class TestForegroundGate:
