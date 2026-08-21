@@ -29,6 +29,13 @@ LOGS_HEIGHT = 520
 SETTINGS_WIDTH = 500
 SETTINGS_HEIGHT = 420
 
+# --- Live typing suggestion popup ---------------------------------------
+# Width fits a corrected sentence; height is per row and the popup grows
+# to the number of suggestions actually shown.
+SUGGEST_WIDTH = 460
+SUGGEST_ROW_HEIGHT = 22
+SUGGEST_PAD = 6
+
 # --- Auto-size behaviour for the main overlay ---------------------------
 # When locked, the overlay can't be scrolled, so it auto-grows to fit
 # this many messages on screen at once.
