@@ -11,3 +11,12 @@ Pillow>=10.0.0
 # only way to capture Dota's voice chat (it comes out of the speakers).
 faster-whisper>=1.0.0
 PyAudioWPatch>=0.2.12
+
+# --- Live typing suggestions in Dota's chat box ---
+# symspellpy ships an 82k-word English frequency dictionary and does
+# edit-distance lookups in microseconds, which is what lets us correct
+# the current word on every keystroke without touching the network.
+symspellpy>=6.7.7
+# LanguageTool's HTTP API for whole-sentence grammar. deep-translator
+# already pulls requests in transitively; pin it so it's explicit.
+requests>=2.31.0
