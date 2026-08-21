@@ -20,16 +20,23 @@ for _pkg in ("faster_whisper", "ctranslate2", "onnxruntime", "av", "tokenizers")
 # collect_all treated the package.
 _voice_datas += collect_data_files("faster_whisper", includes=["**/*.onnx"])
 
+# Typing suggestions: symspellpy carries its 82k-word English frequency
+# list as package DATA, not code, so following imports never finds it.
+# Without it the word fixes and completions fall back to the ~75 Dota
+# terms in suggest.py and look broken rather than absent.
+_suggest_datas = collect_data_files("symspellpy", includes=["**/*.txt"])
+
 
 a = Analysis(
     ['E:\\Coding\\Coding\\Sites\\projects\\dota2 translate\\main.py'],
     pathex=[],
     binaries=_voice_binaries,
-    datas=[('gg.png', '.'), ('gg.ico', '.')] + _voice_datas,
+    datas=[('gg.png', '.'), ('gg.ico', '.')] + _voice_datas + _suggest_datas,
     hiddenimports=[
         'pytesseract', 'deep_translator', 'PIL', 'cv2', 'mss',
         'pyaudiowpatch', 'faster_whisper', 'ctranslate2',
         'onnxruntime', 'av', 'tokenizers',
+        'symspellpy', 'requests',
     ] + _voice_hidden,
     hookspath=[],
     hooksconfig={},

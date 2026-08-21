@@ -18,6 +18,8 @@ Pure module — no ctypes, no Tk, no network.
 from __future__ import annotations
 
 import bisect
+import os
+import sys
 from dataclasses import dataclass
 
 from symspellpy import SymSpell, Verbosity
@@ -125,15 +127,42 @@ class Suggester:
                 self._sym.create_dictionary_entry(word, scaled)
 
     def _load_bundled(self) -> None:
-        """Load symspellpy's own 82k-word English frequency dictionary."""
+        """Load symspellpy's own 82k-word English frequency dictionary.
+
+        The frozen build unpacks package data next to the exe rather
+        than inside an importable package, so the resource lookup is
+        tried first and the bundle layout second. Losing this file is
+        not fatal — the Dota vocabulary still loads — but it degrades
+        the feature to about 75 words, which looks broken rather than
+        absent, so it is worth saying loudly.
+        """
+        for path in self._dictionary_candidates():
+            try:
+                if path and os.path.isfile(path):
+                    self._sym.load_dictionary(path, term_index=0,
+                                              count_index=1, encoding="utf-8")
+                    return
+            except Exception as e:
+                print(f"[suggest] dictionary at {path} failed: {e}", flush=True)
+        print("[suggest] English dictionary not found — only Dota terms "
+              "will be suggested", flush=True)
+
+    @staticmethod
+    def _dictionary_candidates() -> list[str]:
+        name = "frequency_dictionary_en_82_765.txt"
+        out: list[str] = []
         try:
             import importlib.resources as res
-            path = res.files("symspellpy") / "frequency_dictionary_en_82_765.txt"
-            self._sym.load_dictionary(str(path), term_index=0, count_index=1,
-                                      encoding="utf-8")
-        except Exception as e:
-            print(f"[suggest] bundled dictionary failed to load: {e}",
-                  flush=True)
+            out.append(str(res.files("symspellpy") / name))
+        except Exception:
+            pass
+        base = getattr(sys, "_MEIPASS", None)
+        if base:
+            out.append(os.path.join(base, "symspellpy", name))
+        if getattr(sys, "frozen", False):
+            out.append(os.path.join(os.path.dirname(sys.executable),
+                                    "symspellpy", name))
+        return out
 
     def suggest_word(
         self,
