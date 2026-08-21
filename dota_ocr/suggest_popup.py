@@ -6,8 +6,14 @@ treatment Overlay._apply_noactivate gives the main overlay. And it must
 not accept clicks, because the user's mouse belongs to the game; every
 interaction goes through the keyboard instead.
 
-All methods must be called on the Tk main thread. The controller
-marshals them there through its UI queue.
+This is a pure renderer: the controller owns the item list and which
+one is highlighted, and passes both in. Keeping the selection out here
+matters because the keys that move it arrive on the hook thread, while
+these widgets may only be touched from the Tk thread — reading the
+highlight back off a widget would be a cross-thread race on the one
+value Tab acts on.
+
+All methods must be called on the Tk main thread.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ _KIND_LABEL = {
     "translate": "translate",
 }
 
-_MAX_ROWS = 8
+MAX_ROWS = 8
 
 
 class SuggestPopup:
@@ -40,23 +46,18 @@ class SuggestPopup:
         self.root = root
         self._win: tk.Toplevel | None = None
         self._rows: list[tk.Label] = []
-        self._items: list[Suggestion] = []
-        self._index = 0
+        self._count = 0
 
     @property
     def visible(self) -> bool:
-        return self._win is not None and bool(self._items)
+        return self._win is not None and self._count > 0
 
-    def show(self, suggestions: list[Suggestion], x: int, y: int) -> None:
-        if not suggestions:
+    def show(self, items: list[Suggestion], index: int, x: int, y: int) -> None:
+        """Render `items` with row `index` highlighted."""
+        items = list(items)[:MAX_ROWS]
+        if not items:
             self.hide()
             return
-
-        # Keep the highlight where it was when the list is only being
-        # refreshed, so a suggestion doesn't jump out from under Tab.
-        keep = self._index if self._index < len(suggestions) else 0
-        self._items = list(suggestions)[:_MAX_ROWS]
-        self._index = keep
 
         if self._win is None:
             self._build()
@@ -64,19 +65,18 @@ class SuggestPopup:
         if win is None:
             return
 
-        height = (len(self._items) * _sz.SUGGEST_ROW_HEIGHT
-                  + _sz.SUGGEST_PAD * 2)
+        self._count = len(items)
+        height = len(items) * _sz.SUGGEST_ROW_HEIGHT + _sz.SUGGEST_PAD * 2
         try:
             win.geometry(f"{_sz.SUGGEST_WIDTH}x{height}+{int(x)}+{int(y)}")
             win.deiconify()
             win.lift()
         except Exception:
             pass
-        self._render()
+        self._render(items, index)
 
     def hide(self) -> None:
-        self._items = []
-        self._index = 0
+        self._count = 0
         if self._win is not None:
             try:
                 self._win.withdraw()
@@ -91,29 +91,7 @@ class SuggestPopup:
                 pass
         self._win = None
         self._rows = []
-        self._items = []
-        self._index = 0
-
-    def move_up(self) -> None:
-        """Up opens the list, then walks it upward."""
-        if not self._items:
-            return
-        self._index = (self._index - 1) % len(self._items)
-        self._render()
-
-    def move_next(self) -> None:
-        if not self._items:
-            return
-        self._index = (self._index + 1) % len(self._items)
-        self._render()
-
-    def move_prev(self) -> None:
-        self.move_up()
-
-    def selected(self) -> Suggestion | None:
-        if not self._items:
-            return None
-        return self._items[self._index]
+        self._count = 0
 
     # ---- internals ----
 
@@ -131,7 +109,7 @@ class SuggestPopup:
         self._rows = [
             tk.Label(win, text="", bg="#0a0a0a", fg="#e0e0e0",
                      font=("Consolas", 10), anchor="w", padx=8, pady=1)
-            for _ in range(_MAX_ROWS)
+            for _ in range(MAX_ROWS)
         ]
 
     def _apply_noactivate(self, win: tk.Toplevel) -> None:
@@ -158,7 +136,7 @@ class SuggestPopup:
         except Exception:
             pass
 
-    def _render(self) -> None:
+    def _render(self, items: list[Suggestion], index: int) -> None:
         if self._win is None:
             return
         for lbl in self._rows:
@@ -166,14 +144,14 @@ class SuggestPopup:
                 lbl.pack_forget()
             except Exception:
                 pass
-        for i, item in enumerate(self._items):
+        for i, item in enumerate(items):
             lbl = self._rows[i]
-            marker = "▸ " if i == self._index else "  "
+            marker = "▸ " if i == index else "  "
             tag = _KIND_LABEL.get(item.kind, item.kind)
             lbl.configure(
                 text=f"{marker}{item.text}    [{tag}]",
-                fg=("#ffffff" if i == self._index
+                fg=("#ffffff" if i == index
                     else _KIND_COLOR.get(item.kind, "#e0e0e0")),
-                bg=("#2a2a1a" if i == self._index else "#0a0a0a"),
+                bg=("#2a2a1a" if i == index else "#0a0a0a"),
             )
             lbl.pack(fill="x")

@@ -1,8 +1,9 @@
-"""Tests for the suggestion popup's selection behaviour.
+"""Tests for the suggestion popup's rendering contract.
 
-The navigation logic is what Tab acts on, so an off-by-one here inserts
-a word the user didn't pick. These drive a real Tk window because the
-selection state and the widget state have to stay in step.
+The popup is a pure renderer — the controller owns which row is
+highlighted — so what matters here is that it shows and hides on the
+right inputs, survives out-of-range indices, and never leaves a stale
+window on screen. These drive a real Tk window.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import pytest
 tk = pytest.importorskip("tkinter")
 
 from dota_ocr.suggest import Suggestion
-from dota_ocr.suggest_popup import SuggestPopup
+from dota_ocr.suggest_popup import MAX_ROWS, SuggestPopup
 
 
 @pytest.fixture
@@ -51,81 +52,70 @@ ITEMS = [
 class TestVisibility:
     def test_starts_hidden(self, popup):
         assert popup.visible is False
-        assert popup.selected() is None
 
     def test_show_makes_it_visible(self, popup):
-        popup.show(ITEMS, 100, 100)
+        popup.show(ITEMS, 0, 100, 100)
         assert popup.visible is True
 
     def test_showing_nothing_hides_it(self, popup):
-        popup.show(ITEMS, 100, 100)
-        popup.show([], 100, 100)
+        popup.show(ITEMS, 0, 100, 100)
+        popup.show([], 0, 100, 100)
         assert popup.visible is False
 
-    def test_hide_clears_selection(self, popup):
-        popup.show(ITEMS, 100, 100)
+    def test_hide_makes_it_invisible(self, popup):
+        popup.show(ITEMS, 0, 100, 100)
         popup.hide()
         assert popup.visible is False
-        assert popup.selected() is None
+
+    def test_hide_before_show_is_safe(self, popup):
+        popup.hide()
+        assert popup.visible is False
+
+    def test_reshow_after_hide_works(self, popup):
+        popup.show(ITEMS, 0, 100, 100)
+        popup.hide()
+        popup.show(ITEMS, 1, 100, 100)
+        assert popup.visible is True
 
     def test_destroy_is_safe_twice(self, popup):
-        popup.show(ITEMS, 100, 100)
+        popup.show(ITEMS, 0, 100, 100)
         popup.destroy()
         popup.destroy()
         assert popup.visible is False
 
 
-class TestSelection:
-    def test_first_item_is_selected_by_default(self, popup):
-        popup.show(ITEMS, 100, 100)
-        assert popup.selected().text == "mid"
+class TestRendering:
+    def test_one_row_per_item(self, popup):
+        popup.show(ITEMS, 0, 100, 100)
+        packed = [r for r in popup._rows if r.winfo_manager()]
+        assert len(packed) == len(ITEMS)
 
-    def test_next_walks_forward(self, popup):
-        popup.show(ITEMS, 100, 100)
-        popup.move_next()
-        assert popup.selected().text == "middle"
+    def test_highlighted_row_gets_the_marker(self, popup):
+        popup.show(ITEMS, 1, 100, 100)
+        assert popup._rows[1].cget("text").startswith("▸")
+        assert not popup._rows[0].cget("text").startswith("▸")
 
-    def test_next_wraps_around(self, popup):
-        popup.show(ITEMS, 100, 100)
-        for _ in range(3):
-            popup.move_next()
-        assert popup.selected().text == "mid"
+    def test_row_text_includes_the_kind_label(self, popup):
+        popup.show([Suggestion("I need help", "sentence", "line")],
+                   0, 100, 100)
+        assert "[grammar]" in popup._rows[0].cget("text")
 
-    def test_up_wraps_to_the_end(self, popup):
-        popup.show(ITEMS, 100, 100)
-        popup.move_up()
-        assert popup.selected().text == "might"
+    def test_out_of_range_index_still_renders(self, popup):
+        popup.show(ITEMS, 99, 100, 100)
+        assert popup.visible is True
 
-    def test_prev_matches_up(self, popup):
-        popup.show(ITEMS, 100, 100)
-        popup.move_prev()
-        assert popup.selected().text == "might"
-
-    def test_navigation_while_hidden_is_safe(self, popup):
-        popup.move_next()
-        popup.move_up()
-        assert popup.selected() is None
-
-
-class TestRefresh:
-    def test_refresh_keeps_the_highlight(self, popup):
-        """A new keystroke must not slide a different word under Tab."""
-        popup.show(ITEMS, 100, 100)
-        popup.move_next()
-        popup.show(ITEMS, 100, 100)
-        assert popup.selected().text == "middle"
-
-    def test_shorter_list_resets_an_out_of_range_highlight(self, popup):
-        popup.show(ITEMS, 100, 100)
-        popup.move_next()
-        popup.move_next()
-        popup.show(ITEMS[:1], 100, 100)
-        assert popup.selected().text == "mid"
+    def test_negative_index_still_renders(self, popup):
+        popup.show(ITEMS, -1, 100, 100)
+        assert popup.visible is True
 
     def test_more_items_than_rows_are_capped(self, popup):
         many = [Suggestion(f"w{i}", "complete", "word") for i in range(20)]
-        popup.show(many, 100, 100)
-        assert popup.selected() is not None
-        for _ in range(30):
-            popup.move_next()
-        assert popup.selected() is not None
+        popup.show(many, 0, 100, 100)
+        packed = [r for r in popup._rows if r.winfo_manager()]
+        assert len(packed) == MAX_ROWS
+
+    def test_shrinking_the_list_drops_stale_rows(self, popup):
+        popup.show(ITEMS, 0, 100, 100)
+        popup.show(ITEMS[:1], 0, 100, 100)
+        packed = [r for r in popup._rows if r.winfo_manager()]
+        assert len(packed) == 1
