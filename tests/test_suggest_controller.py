@@ -247,7 +247,7 @@ class TestSwallow:
     def test_nav_keys_pass_through_when_nothing_is_showing(self):
         ctrl, _, _ = _make()
         _open_chat(ctrl)
-        for vk in (VK_TAB, VK_UP, VK_DOWN, VK_ESCAPE):
+        for vk in (VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_ESCAPE):
             ev = KeyEvent(vk=vk, down=True, char="", shift=False,
                           ctrl=False, alt=False)
             assert ctrl.should_swallow(ev) is False
@@ -257,22 +257,32 @@ class TestSwallow:
         _open_chat(ctrl)
         _ch(ctrl, "mi")
         assert popup.visible is True
-        for vk in (VK_TAB, VK_UP, VK_DOWN, VK_ESCAPE):
+        for vk in (VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_ESCAPE):
             ev = KeyEvent(vk=vk, down=True, char="", shift=False,
                           ctrl=False, alt=False)
             assert ctrl.should_swallow(ev) is True
 
     def test_swallowing_does_not_wait_for_the_tk_thread(self):
         """The decision must hold the instant the key arrives, not one
-        pump later, or Tab leaks into the game."""
+        pump later, or the key leaks into the game."""
         ctrl, _, _ = _make()
         _open_chat(ctrl)
         for c in "mi":
             ctrl.handle_event(KeyEvent(vk=ord(c.upper()), down=True, char=c,
                                        shift=False, ctrl=False, alt=False))
-        ev = KeyEvent(vk=VK_TAB, down=True, char="", shift=False,
+        ev = KeyEvent(vk=VK_RIGHT, down=True, char="", shift=False,
                       ctrl=False, alt=False)
         assert ctrl.should_swallow(ev) is True
+
+    def test_tab_is_never_swallowed(self):
+        """Tab belongs to the scoreboard now, even mid-sentence."""
+        ctrl, popup, _ = _make()
+        _open_chat(ctrl)
+        _ch(ctrl, "mi")
+        assert popup.visible is True
+        ev = KeyEvent(vk=VK_TAB, down=True, char="", shift=False,
+                      ctrl=False, alt=False)
+        assert ctrl.should_swallow(ev) is False
 
     def test_letters_are_never_swallowed(self):
         ctrl, _, _ = _make()
@@ -292,7 +302,7 @@ class TestSwallow:
 
     def test_nothing_is_swallowed_when_chat_is_closed(self):
         ctrl, _, _ = _make()
-        ev = KeyEvent(vk=VK_TAB, down=True, char="", shift=False,
+        ev = KeyEvent(vk=VK_RIGHT, down=True, char="", shift=False,
                       ctrl=False, alt=False)
         assert ctrl.should_swallow(ev) is False
 
@@ -301,7 +311,7 @@ class TestSwallow:
         _open_chat(ctrl)
         _ch(ctrl, "mi")
         _vk(ctrl, VK_ESCAPE)
-        ev = KeyEvent(vk=VK_TAB, down=True, char="", shift=False,
+        ev = KeyEvent(vk=VK_RIGHT, down=True, char="", shift=False,
                       ctrl=False, alt=False)
         assert ctrl.should_swallow(ev) is False
 
@@ -355,42 +365,42 @@ class TestSelection:
 
 
 class TestAccept:
-    def test_tab_replaces_the_word(self):
+    def test_right_replaces_the_word(self):
         ctrl, popup, typer = _make()
         _open_chat(ctrl)
         _ch(ctrl, "mi")
         chosen = popup.items[popup.index].text
-        _vk(ctrl, VK_TAB)
+        _vk(ctrl, VK_RIGHT)
         assert typer.calls[0] == ("word", 2, chosen)
 
-    def test_tab_updates_the_buffer_to_match(self):
+    def test_insert_updates_the_buffer_to_match(self):
         ctrl, popup, _ = _make()
         _open_chat(ctrl)
         _ch(ctrl, "mi")
         chosen = popup.items[popup.index].text
-        _vk(ctrl, VK_TAB)
+        _vk(ctrl, VK_RIGHT)
         assert ctrl.buffer.text == chosen
 
-    def test_tab_takes_the_highlighted_one_not_the_first(self):
+    def test_insert_takes_the_highlighted_one_not_the_first(self):
         ctrl, popup, typer = _make()
         _open_chat(ctrl)
         _ch(ctrl, "mi")
         _vk(ctrl, VK_DOWN)
         chosen = popup.items[popup.index].text
-        _vk(ctrl, VK_TAB)
+        _vk(ctrl, VK_RIGHT)
         assert typer.calls[0] == ("word", 2, chosen)
 
-    def test_tab_hides_the_popup(self):
+    def test_insert_hides_the_popup(self):
         ctrl, popup, _ = _make()
         _open_chat(ctrl)
         _ch(ctrl, "mi")
-        _vk(ctrl, VK_TAB)
+        _vk(ctrl, VK_RIGHT)
         assert popup.visible is False
 
-    def test_tab_with_no_popup_does_nothing(self):
+    def test_insert_with_no_popup_does_nothing(self):
         ctrl, _, typer = _make()
         _open_chat(ctrl)
-        _vk(ctrl, VK_TAB)
+        _vk(ctrl, VK_RIGHT)
         assert typer.calls == []
 
     def test_accepting_mid_line_keeps_the_rest(self):
@@ -398,7 +408,7 @@ class TestAccept:
         _open_chat(ctrl)
         _ch(ctrl, "push mi")
         chosen = popup.items[popup.index].text
-        _vk(ctrl, VK_TAB)
+        _vk(ctrl, VK_RIGHT)
         assert typer.calls[0] == ("word", 2, chosen)
         assert ctrl.buffer.text == "push " + chosen
 
@@ -413,7 +423,7 @@ class TestAccept:
         ctrl.run_pending_grammar()
         ctrl.pump()
         assert popup.visible is True
-        _vk(ctrl, VK_TAB)
+        _vk(ctrl, VK_RIGHT)
         assert typer.calls[0] == ("back", len("i need halp"))
         assert typer.calls[1] == ("text", "I need help")
         assert ctrl.buffer.text == "I need help"
@@ -532,40 +542,48 @@ class TestToggles:
 
 
 class TestCaretKeys:
-    """Left and Right belong to the game, not to the popup."""
+    """Left and Right insert while the popup is up, and only then.
 
-    def test_left_and_right_are_never_swallowed(self):
-        ctrl, popup, _ = _make()
-        _open_chat(ctrl)
-        _ch(ctrl, "mi")
-        assert popup.visible is True
+    With the popup hidden they go back to being ordinary caret keys, so
+    the user can still walk around inside a half-typed line.
+    """
+
+    def test_left_and_right_insert_while_the_popup_is_up(self):
         for vk in (VK_LEFT, VK_RIGHT):
-            ev = KeyEvent(vk=vk, down=True, char="", shift=False,
-                          ctrl=False, alt=False)
-            assert ctrl.should_swallow(ev) is False
+            ctrl, popup, typer = _make()
+            _open_chat(ctrl)
+            _ch(ctrl, "mi")
+            chosen = popup.items[popup.index].text
+            _vk(ctrl, vk)
+            assert typer.calls[0] == ("word", 2, chosen)
+            assert popup.visible is False
 
-    def test_left_and_right_do_not_change_the_selection(self):
-        ctrl, popup, _ = _make()
-        _open_chat(ctrl)
-        _ch(ctrl, "mi")
-        _vk(ctrl, VK_LEFT)
-        _vk(ctrl, VK_RIGHT)
-        assert popup.index == 0
-
-    def test_the_caret_still_moves(self):
+    def test_they_do_not_move_the_caret_while_the_popup_is_up(self):
         ctrl, _, _ = _make()
         _open_chat(ctrl)
         _ch(ctrl, "mi")
         _vk(ctrl, VK_LEFT)
+        # The word was inserted, so the caret sits after it.
+        assert ctrl.buffer.cursor == len(ctrl.buffer.text)
+
+    def test_they_move_the_caret_once_the_popup_is_gone(self):
+        ctrl, popup, typer = _make()
+        _open_chat(ctrl)
+        _ch(ctrl, "mi")
+        _vk(ctrl, VK_ESCAPE)
+        assert popup.visible is False
+        _vk(ctrl, VK_LEFT)
+        assert typer.calls == []
         assert ctrl.buffer.cursor == 1
         assert ctrl.buffer.text == "mi"
 
     def test_walking_back_into_a_word_resuggests_for_it(self):
-        """Suggestions must follow the caret, not the last keypress."""
+        """Suggestions follow the caret, not the last keypress."""
         ctrl, popup, _ = _make()
         _open_chat(ctrl)
         _ch(ctrl, "push mi")
         assert "middle" in [s.text for s in popup.items]
+        _vk(ctrl, VK_ESCAPE)
         # Step the caret back over "mi" and the space, into "push".
         for _ in range(3):
             _vk(ctrl, VK_LEFT)
@@ -576,6 +594,7 @@ class TestCaretKeys:
         ctrl, popup, _ = _make()
         _open_chat(ctrl)
         _ch(ctrl, "mi")
+        _vk(ctrl, VK_ESCAPE)
         _vk(ctrl, VK_LEFT)
         _vk(ctrl, VK_LEFT)
         assert ctrl.buffer.cursor == 0
@@ -608,7 +627,7 @@ class TestForegroundGate:
         _ch(ctrl, "mi")
         assert popup.visible is True
         fg.value = False
-        ev = KeyEvent(vk=VK_TAB, down=True, char="", shift=False,
+        ev = KeyEvent(vk=VK_RIGHT, down=True, char="", shift=False,
                       ctrl=False, alt=False)
         assert ctrl.should_swallow(ev) is False
 

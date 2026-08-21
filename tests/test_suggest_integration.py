@@ -23,7 +23,7 @@ tk = pytest.importorskip("tkinter")
 from dota_ocr.suggest import Suggester
 from dota_ocr.suggest_controller import SuggestController
 from dota_ocr.suggest_popup import SuggestPopup
-from dota_ocr.typing_buffer import KeyEvent, VK_RETURN, VK_TAB
+from dota_ocr.typing_buffer import KeyEvent, VK_RETURN, VK_RIGHT
 
 
 class _Typer:
@@ -126,11 +126,11 @@ class TestRealPopupPath:
         _press(ctrl, VK_RETURN)
         assert popup.visible is False
 
-    def test_tab_types_the_highlighted_word(self, wired):
+    def test_right_arrow_types_the_highlighted_word(self, wired):
         ctrl, popup, typer = wired
         _press(ctrl, VK_RETURN)
         _type(ctrl, "mi")
-        _press(ctrl, VK_TAB)
+        _press(ctrl, VK_RIGHT)
         assert typer.calls[0][0] == "word"
         assert typer.calls[0][1] == 2
         assert ctrl.buffer.text == typer.calls[0][2]

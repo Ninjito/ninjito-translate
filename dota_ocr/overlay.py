@@ -2249,7 +2249,7 @@ class Overlay:
                  bg="#0a0a0a", fg="#bbbbbb", font=("Consolas", 9)
                  ).pack(anchor="w", padx=10, pady=(10, 2))
         tk.Label(parent,
-                 text="↑ ↓ choose    Tab insert    Esc close",
+                 text="↑ ↓ choose    ← → insert    Esc close",
                  bg="#0a0a0a", fg="#777777", font=("Consolas", 8)
                  ).pack(anchor="w", padx=10, pady=(0, 8))
 

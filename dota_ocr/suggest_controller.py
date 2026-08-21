@@ -22,7 +22,7 @@ Three threads meet here, and the split between them is the whole design:
 The controller owns the item list and the highlighted index. The popup
 is a renderer. That matters because the arrow keys arrive on the hook
 thread while the widgets belong to Tk — reading the highlight back off
-the widget would race on the one value Tab acts on.
+the widget would race on the one value the insert key acts on.
 
 Every dependency is injectable so the decision logic can be tested
 without Windows, a display, or the network.
@@ -39,16 +39,16 @@ from dota_ocr.chat_session import ChatSession
 from dota_ocr.suggest import Suggester, Suggestion
 from dota_ocr.typing_buffer import (
     KeyEvent, TypingBuffer,
-    VK_DOWN, VK_ESCAPE, VK_RETURN, VK_TAB, VK_UP,
+    VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_UP,
 )
 
-# Keys the popup owns while it is on screen.
+# Keys the popup owns while it is on screen: Up/Down choose, Left/Right
+# insert, Escape dismisses.
 #
-# Enter is deliberately absent: it must always reach Dota so the message
-# actually sends. Left and Right are absent too — they stay with the
-# game so the caret still moves inside the half-typed line, and the
-# buffer follows along.
-NAV_KEYS = frozenset({VK_TAB, VK_UP, VK_DOWN, VK_ESCAPE})
+# Enter is deliberately absent — it must always reach Dota so the
+# message actually sends. Tab is absent too, so it keeps opening the
+# scoreboard even mid-sentence.
+NAV_KEYS = frozenset({VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_ESCAPE})
 
 # How often the Tk thread drains the UI queue. Fast enough that the
 # popup tracks typing, slow enough to cost nothing.
@@ -251,7 +251,7 @@ class SuggestController:
                 self._move(-1)
             elif ev.vk == VK_DOWN:
                 self._move(1)
-            elif ev.vk == VK_TAB:
+            elif ev.vk in (VK_LEFT, VK_RIGHT):
                 self._accept()
             return
 
@@ -272,9 +272,10 @@ class SuggestController:
             return
 
         # Refresh on caret movement as well as on edits. Left and Right
-        # reach the game now, so the user can walk back into an earlier
-        # word — and the suggestions have to be for the word the caret is
-        # actually sitting in, not the one they last typed.
+        # only insert while the popup is up; with it hidden they reach
+        # the game and move the caret, so the user can still walk back
+        # into an earlier word — and the suggestions have to be for the
+        # word the caret is sitting in, not the one they last typed.
         before = (self.buffer.text, self.buffer.cursor)
         self.buffer.apply(ev)
         if (self.buffer.text, self.buffer.cursor) != before:
