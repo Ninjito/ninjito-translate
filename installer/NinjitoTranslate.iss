@@ -36,6 +36,11 @@ SetupIconFile=gg.ico
 UninstallDisplayIcon={app}\{#AppExe}
 WizardStyle=modern
 
+; Show the MIT terms during setup. build.py also drops LICENSE.txt beside
+; the EXE -- the license requires the notice to travel with every copy, so
+; showing it once in the wizard is not enough on its own.
+LicenseFile=LICENSE
+
 ; The payload is a few hundred MB of DLLs and OCR data, so max compression
 ; is worth the extra CI minutes -- it comes straight off the download size.
 Compression=lzma2/max

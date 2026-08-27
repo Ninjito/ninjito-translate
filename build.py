@@ -4,6 +4,7 @@ Produces `dist/NinjitoTranslate/` which contains:
     - NinjitoTranslate.exe          (the app, no Python needed)
     - Tesseract-OCR/                (bundled OCR engine)
     - config.json                   (editable settings)
+    - LICENSE.txt                   (MIT, required to ship with copies)
     - _internal/                    (Python libs — leave alone)
 
 Zip the whole folder and send it to friends.  They extract & run the EXE.
@@ -169,6 +170,23 @@ def copy_config() -> None:
         print("[build] WARNING: config.json not found — friends will need to calibrate.")
 
 
+def copy_license() -> None:
+    """Ship the MIT license text with the app.
+
+    Not optional politeness: the license itself says the copyright notice
+    "shall be included in all copies or substantial portions of the
+    Software". A build that omits it hands people the app without the
+    permission grant that makes it theirs to use.
+    """
+    src = ROOT / "LICENSE"
+    dst = DIST / APP_NAME / "LICENSE.txt"
+    if src.exists():
+        shutil.copy2(src, dst)
+        print(f"[build] Copied LICENSE -> {dst}")
+    else:
+        print("[build] WARNING: no LICENSE file to bundle.")
+
+
 def write_readme() -> None:
     readme = DIST / APP_NAME / "README.txt"
     readme.write_text(
@@ -235,6 +253,7 @@ def main() -> None:
     copy_tesseract()
     copy_models()
     copy_config()
+    copy_license()
     write_readme()
     final = DIST / APP_NAME
     print(f"\n[build] DONE.  Portable app at: {final}")
