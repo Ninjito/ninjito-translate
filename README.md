@@ -115,3 +115,12 @@ Captured chat and voice transcripts are written to `logs/history.jsonl` next
 to the app, on your machine only. Nothing is uploaded anywhere by this
 project. That file is git-ignored and should never be committed — it contains
 other players' messages.
+
+## License
+
+[MIT](LICENSE) — do what you like with it, keep the copyright notice, no
+warranty.
+
+Bundled third-party components keep their own licenses. Most are MIT, BSD or
+Apache-2.0; [Tesseract](https://github.com/tesseract-ocr/tesseract) is
+Apache-2.0 and [pystray](https://github.com/moses-palmer/pystray) is LGPL-3.0.
