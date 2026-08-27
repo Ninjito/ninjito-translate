@@ -1,28 +1,33 @@
-pytesseract>=0.3.10
-mss>=9.0.0
-opencv-python>=4.8.0
-numpy>=1.24.0
-deep-translator>=1.11.0
-Pillow>=10.0.0
+# Pinned to exact versions on purpose. With >= ranges every build
+# resolved whatever was current that day, so two builds of the same
+# commit produced different binaries and a reported bug might not
+# reproduce. Bump these deliberately, then run the tests.
+
+pytesseract==0.3.13
+mss==10.0.0
+opencv-python==4.12.0.88
+numpy==2.2.6
+deep-translator==1.11.4
+Pillow==12.2.0
 
 # --- Russian voice-chat translation ---
 # faster-whisper runs on CTranslate2, so it needs neither torch nor CUDA.
 # pyaudiowpatch is a PyAudio fork that adds WASAPI loopback, which is the
 # only way to capture Dota's voice chat (it comes out of the speakers).
-faster-whisper>=1.0.0
-PyAudioWPatch>=0.2.12
+faster-whisper==1.2.1
+PyAudioWPatch==0.2.12.8
 
 # --- Live typing suggestions in Dota's chat box ---
 # symspellpy ships an 82k-word English frequency dictionary and does
 # edit-distance lookups in microseconds, which is what lets us correct
 # the current word on every keystroke without touching the network.
-symspellpy>=6.7.7
+symspellpy==6.10.0
 # LanguageTool's HTTP API for whole-sentence grammar. deep-translator
 # already pulls requests in transitively; pin it so it's explicit.
-requests>=2.31.0
+requests==2.32.4
 
 # --- System tray icon ---
 # Lets the app be quit (and shown, hidden, or configured) without the
 # overlay being on screen. Pillow is already a dependency above and
 # supplies the icon image.
-pystray>=0.19.0
+pystray==0.19.5
