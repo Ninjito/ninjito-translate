@@ -74,3 +74,9 @@ frame_*.png
 
 # --- Inno Setup installer output ---
 installer/out/
+
+# --- Local planning notes ---
+# Design notes and implementation plans written while working on the app.
+# Working notes, not part of the product; nothing in the code refers to
+# them. Kept on disk, never published.
+docs/
