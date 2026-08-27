@@ -95,8 +95,18 @@ class Suggester:
         self.max_results = max_results
         self.min_prefix = min_prefix
         self._max_edit = max_edit_distance
+        # prefix_length trades index size against candidate-verification
+        # work; it does not change which suggestions come back, because
+        # symspell still checks every candidate by real edit distance.
+        # Measured over ~7,600 generated typos against the 4k most
+        # frequent words, top-3 and top-1 recall are identical at 7 and
+        # at 5 (92.8%/83.2% for one edit, 70.5%/59.8% for two), while the
+        # deletion index drops from 127 MB to 38 MB. The cost is lookup
+        # time, worst case 0.65ms — a keystroke has 30ms before the pump
+        # even looks. Going to 4 saves another 13 MB and quadruples that,
+        # which is the wrong side of the trade.
         self._sym = SymSpell(max_dictionary_edit_distance=max_edit_distance,
-                             prefix_length=7)
+                             prefix_length=5)
 
         if words is None:
             self._load_bundled()

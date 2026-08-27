@@ -37,6 +37,9 @@ a = Analysis(
         'pyaudiowpatch', 'faster_whisper', 'ctranslate2',
         'onnxruntime', 'av', 'tokenizers',
         'symspellpy', 'requests',
+        # pystray picks its backend at import time, so the Windows one is
+        # never reachable by static analysis and has to be named here.
+        'pystray', 'pystray._win32',
     ] + _voice_hidden,
     hookspath=[],
     hooksconfig={},

@@ -22,7 +22,10 @@ from typing import Optional
 import mss
 import numpy as np
 
-from dota_ocr.window import find_dota_hwnd, get_client_screen_rect, is_foreground
+from dota_ocr.window import (
+    find_dota_hwnd, get_client_screen_rect, is_foreground,
+    region_is_unoccluded,
+)
 from dota_ocr.winshot import grab_window
 
 _MODE_PRINTWINDOW = "printwindow"
@@ -63,16 +66,19 @@ class RegionCapture:
 
     # ---------------- Dota-relative paths ----------------
     def _grab_relative_printwindow(self, hwnd: int) -> Optional[np.ndarray]:
-        img = grab_window(hwnd)
-        if img is None:
-            return None
-        # Sanity: PrintWindow on fullscreen DX sometimes returns an all-
-        # black bitmap. Detect that so we can fall back.
-        if img.mean() < 1.0:
-            return None
-        return self._crop_relative(img)
+        # Hand the region to grab_window rather than cropping its result:
+        # it copies straight out of its own pixel buffer and skips a
+        # full-frame copy we would throw away. It also returns None on an
+        # all-black frame (exclusive fullscreen) so the fallback below
+        # still kicks in.
+        rb = self._relative_bbox or {}
+        return grab_window(hwnd, crop=(
+            int(rb.get("left", 0)), int(rb.get("top", 0)),
+            int(rb.get("width", 0)), int(rb.get("height", 0)),
+        ))
 
-    def _grab_relative_screen(self, hwnd: int) -> Optional[np.ndarray]:
+    def _screen_rect(self, hwnd: int) -> Optional[tuple]:
+        """The chat region in screen coordinates, clipped to the client."""
         client = get_client_screen_rect(hwnd)
         if client is None:
             return None
@@ -90,6 +96,15 @@ class RegionCapture:
         height = bottom - top
         if width <= 5 or height <= 5:
             return None
+        return (left, top, width, height)
+
+    def _grab_relative_screen(self, hwnd: int,
+                             rect: Optional[tuple] = None) -> Optional[np.ndarray]:
+        if rect is None:
+            rect = self._screen_rect(hwnd)
+        if rect is None:
+            return None
+        left, top, width, height = rect
         bbox = {"left": left, "top": top, "width": width, "height": height}
         raw = np.array(self._sct.grab(bbox))
         return raw[:, :, :3].copy()
@@ -119,6 +134,19 @@ class RegionCapture:
             return None
 
         if self._mode == _MODE_PRINTWINDOW:
+            # PrintWindow is the correct-but-expensive path: it pulls
+            # from Dota's own render buffer, so it works through anything
+            # drawn on top, at the cost of 5.0ms of CPU and a readback of
+            # the game's surface. Screen capture costs 0.62ms and touches
+            # nothing the GPU is busy with — but only tells the truth
+            # while the chat region is genuinely unobscured. So we ask.
+            rect = self._screen_rect(hwnd)
+            if rect is not None and region_is_unoccluded(hwnd, rect):
+                img = self._grab_relative_screen(hwnd, rect)
+                if img is not None:
+                    self._printwindow_failures = 0
+                    return img
+
             img = self._grab_relative_printwindow(hwnd)
             if img is not None:
                 self._printwindow_failures = 0

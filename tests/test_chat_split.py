@@ -68,3 +68,34 @@ class TestSplitChatLine:
 
     def test_empty_input(self):
         assert split_chat_line("") == ("", "")
+
+
+class TestOcrEngineMode:
+    """Tesseract must run LSTM-only.
+
+    The default OEM also loads the legacy engine's share of the 20 MB
+    rus.traineddata on every capture, which measured 26% slower AND less
+    accurate (0.915 vs 0.951 over 25 Cyrillic chat frames).
+    """
+
+    def test_config_pins_lstm_only(self, monkeypatch):
+        import numpy as np
+        from dota_ocr.ocr import OCRReader
+
+        seen = {}
+        reader = OCRReader.__new__(OCRReader)
+        reader.preprocess_enabled = False
+        reader.debug = False
+        reader._normalize_cyrillic = False
+        reader._tess_lang = "rus+eng"
+
+        class FakePyt:
+            @staticmethod
+            def image_to_string(img, lang=None, config=None):
+                seen["config"] = config
+                return "[All] x : hi"
+
+        reader._pytesseract = FakePyt
+        reader.read(np.zeros((40, 200), dtype=np.uint8))
+        assert "--oem 1" in seen["config"]
+        assert "--psm 4" in seen["config"]

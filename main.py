@@ -243,14 +243,30 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
     # Auto-retry state: if a trigger produces 0 translations, we immediately
     # re-run capture+OCR (without waiting for another F7 press) up to
     # MAX_ATTEMPTS-1 more times.  OCR can miss text on a single frame.
+    #
+    # Manual triggers only. On a press the user is waiting for an answer
+    # now, so a missed frame is worth three shots at it. The auto-OCR
+    # timer already retries by definition — it fires again in a couple of
+    # seconds — and the overwhelmingly common auto result is "no chat on
+    # screen", which is not a miss to retry but the correct answer. Doing
+    # it anyway tripled every idle tick into three captures and three
+    # ~287ms Tesseract runs.
     MAX_ATTEMPTS = 3
     attempt_num = 0  # 0 = idle; 1..MAX_ATTEMPTS = in a retry burst
+
+    # Whether the pending capture is one the user asked for by name.
+    # Gates the retry burst above, and the debug frame dumps below —
+    # those exist to diagnose a capture you just took, and writing three
+    # PNGs on every timer tick was constant disk traffic nobody reads.
+    manual = True
+
     while not stop_event.is_set() and not overlay.is_closing():
       try:
         # Wait for button click or F7 hotkey — unless we're mid-retry.
         if attempt_num == 0:
             if not overlay.wait_for_trigger(timeout=0.3):
                 continue
+            manual = bool(getattr(overlay, "last_trigger_manual", True))
             attempt_num = 1
         else:
             attempt_num += 1
@@ -273,7 +289,10 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
             overlay.set_status("Dota 2 not found", "#ff4444")
             continue
 
-        if debug:
+        # Debug frames are dumped only for triggers the user asked for.
+        # The three PNG encodes measured 45ms; on a 2-second timer that
+        # is constant disk traffic nobody is reading.
+        if debug and manual:
             try:
                 cv2.imwrite(str(DEBUG_DIR / "frame_raw.png"), img)
                 if ocr.preprocess_enabled:
@@ -475,13 +494,13 @@ def worker(overlay: Overlay, cfg: dict, stop_event: threading.Event,
         if translated_count > 0:
             overlay.set_status(f"Translated {translated_count} line(s)", "#7bd88f")
             attempt_num = 0  # end retry burst on success
+        elif manual and attempt_num < MAX_ATTEMPTS:
+            # Leave attempt_num > 0 so next iteration retries immediately.
+            overlay.set_status(f"Reading... ({attempt_num}/{MAX_ATTEMPTS})", "#ffa500")
         else:
-            if attempt_num < MAX_ATTEMPTS:
-                # Leave attempt_num > 0 so next iteration retries immediately.
-                overlay.set_status(f"Reading... ({attempt_num}/{MAX_ATTEMPTS})", "#ffa500")
-            else:
+            if manual:
                 overlay.set_status("No translatable chat found", "#888")
-                attempt_num = 0
+            attempt_num = 0
       except Exception:
         # Any unhandled error in this iteration: log it, show status,
         # sleep briefly, then keep the loop alive. This way the app
@@ -669,6 +688,29 @@ def main() -> None:
             overlay.root.after(500, _beat)
 
         overlay.root.after(900, _start_suggest)
+
+    # --- System tray icon ---
+    # Gives the app a way to be quit (and shown, hidden, or configured)
+    # without the overlay needing to be on screen. Deferred like the rest
+    # so a slow tray backend can't hold up the window appearing.
+    def _start_tray() -> None:
+        try:
+            from dota_ocr.tray import TrayIcon
+            tray = TrayIcon(
+                root=overlay.root,
+                on_toggle_overlay=overlay.toggle_overlay_visible,
+                on_open_settings=overlay._on_settings_click,
+                on_toggle_voice=overlay.toggle_voice_from_tray,
+                is_voice_on=overlay.is_voice_on,
+                is_overlay_visible=overlay.is_overlay_visible,
+                on_exit=overlay._close,
+            )
+            if tray.start():
+                overlay.set_tray(tray)
+        except Exception as e:
+            print(f"[tray] start failed: {e}", flush=True)
+
+    overlay.root.after(300, _start_tray)
 
     stop_event = threading.Event()
     t = threading.Thread(

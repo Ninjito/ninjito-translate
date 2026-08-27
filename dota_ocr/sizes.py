@@ -25,9 +25,13 @@ PASTE_HEIGHT = 340
 LOGS_WIDTH = 760
 LOGS_HEIGHT = 520
 
-# --- Settings window (hotkeys / capture / theme tabs) -------------------
-SETTINGS_WIDTH = 500
-SETTINGS_HEIGHT = 420
+# --- Settings window (hotkeys / capture / voice / suggest / theme) ------
+# Grew from 500x420 when the panel was rebuilt on cards and a real
+# spacing scale — the old size only fit because everything was crammed.
+# Height is set by Hotkeys, the tallest tab: nine keybind rows plus the
+# note under them.
+SETTINGS_WIDTH = 560
+SETTINGS_HEIGHT = 540
 
 # --- Live typing suggestion popup ---------------------------------------
 # Width fits a corrected sentence; height is per row and the popup grows

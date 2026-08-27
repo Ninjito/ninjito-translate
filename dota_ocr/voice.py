@@ -31,6 +31,7 @@ and must never be able to kill the overlay.
 
 from __future__ import annotations
 
+import gc
 import queue
 import re
 import sys
@@ -43,6 +44,30 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Audio constants
 # ---------------------------------------------------------------------------
+
+# How many CPU cores the transcriber may use. CTranslate2 defaults to
+# grabbing roughly every physical core, which is a lot to take from a
+# machine that is also running Dota. Measured on a 5s utterance (the
+# app's max), int8 "small":
+#
+#     threads   wall    CPU    cores   real-time factor
+#        4      3.47s  13.65s   3.9        0.69
+#        3      4.15s  12.26s   3.0        0.83
+#        2      5.40s  10.57s   2.0        1.08   <- falls behind
+#
+# Three is the floor that still transcribes faster than people speak.
+# At two the queue stops draining during a sustained argument on team
+# voice and utterances get dropped, which costs translations rather
+# than saving anything worth having.
+DEFAULT_CPU_THREADS = 3
+
+# How long Dota has to stay closed before the Whisper weights are handed
+# back. Measured: the model holds ~550 MB, releasing returns ~300 MB of
+# it, and reloading costs 5.5s. Dota needs far longer than that to get
+# from launch to a game with anyone talking, and the reload starts the
+# moment its window appears, so the wait is never on the critical path.
+# The delay keeps an alt-F4-and-requeue from paying it repeatedly.
+MODEL_IDLE_RELEASE_SEC = 180.0
 
 TARGET_RATE = 16000        # what Whisper wants
 FRAME_MS = 30              # VAD frame size
@@ -564,7 +589,9 @@ class Transcriber:
 
     def __init__(self, model_size: str = "small", device: str = "auto",
                  compute_type: str = "int8", lang_prob_min: float = 0.6,
-                 initial_prompt: str = "", on_status=None):
+                 initial_prompt: str = "", on_status=None,
+                 cpu_threads: int = DEFAULT_CPU_THREADS):
+        self.cpu_threads = max(0, int(cpu_threads))
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
@@ -636,9 +663,25 @@ class Transcriber:
             device=device,
             compute_type=compute_type,
             download_root=str(MODEL_DIR),
+            cpu_threads=self.cpu_threads,   # 0 = let CTranslate2 decide
         )
         self._probe(model)
         return model
+
+    def release(self) -> None:
+        """Drop the model so its weights can be reclaimed.
+
+        Safe to call when nothing is loaded. `load()` rebuilds on demand.
+        """
+        with self._lock:
+            if self._model is None:
+                return
+            self._model = None
+        gc.collect()
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
 
     def load(self) -> bool:
         """Load (downloading on first run) the Whisper model. False on failure."""
@@ -769,6 +812,10 @@ class VoiceListener:
         # Bounded: during a teamfight we would rather drop the oldest
         # utterance than build a queue the transcriber can never catch up on.
         self._utterances: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=4)
+        # Logged once per "Dota went away" stretch, not per utterance.
+        self._warned_no_dota = False
+        # When Dota was last seen missing; 0 means "it is here".
+        self._dota_gone_at = 0.0
         self._transcriber: Transcriber | None = None
         self._recent: list[tuple[str, float]] = []   # (normalized text, time)
         self._running = False
@@ -818,6 +865,7 @@ class VoiceListener:
             lang_prob_min=float(v.get("lang_prob_min", 0.6)),
             initial_prompt=(DEFAULT_PROMPT if v.get("use_dota_prompt", True) else ""),
             on_status=self._on_status,
+            cpu_threads=int(v.get("cpu_threads", DEFAULT_CPU_THREADS)),
         )
 
         self._stop.clear()
@@ -975,7 +1023,18 @@ class VoiceListener:
         return resample_to_16k(audio, rate)
 
     def _enqueue(self, utt: np.ndarray) -> None:
-        """Queue an utterance, dropping the oldest if the queue is full."""
+        """Queue an utterance, dropping the oldest if the queue is full.
+
+        Utterances captured while Dota isn't running are dropped here.
+        The loopback stream carries everything the speakers play, so with
+        the game closed this queue fills with the user's music and videos
+        — and each one costs the transcriber several seconds of CPU
+        across four cores to produce a line that is then discarded for
+        not being Russian. There is no Dota voice chat without Dota, so
+        nothing is lost by not listening.
+        """
+        if not self._dota_running():
+            return
         try:
             self._utterances.put_nowait(utt)
         except queue.Full:
@@ -985,6 +1044,21 @@ class VoiceListener:
                 print("[voice] queue full — dropped oldest utterance", flush=True)
             except Exception:
                 pass
+
+    def _dota_running(self) -> bool:
+        """Is Dota open? Cached window lookup, so this is ~5us."""
+        try:
+            from dota_ocr.window import find_dota_hwnd
+            if find_dota_hwnd() is not None:
+                self._warned_no_dota = False
+                return True
+        except Exception:
+            return True   # can't tell — don't silently go deaf
+        if not self._warned_no_dota:
+            self._warned_no_dota = True
+            print("[voice] Dota not running — ignoring system audio "
+                  "until it starts.", flush=True)
+        return False
 
     # -- process ------------------------------------------------------------
     def _process_loop(self) -> None:
@@ -997,11 +1071,34 @@ class VoiceListener:
             try:
                 utt = self._utterances.get(timeout=0.3)
             except queue.Empty:
+                self._sync_model_to_dota(tr)
                 continue
             try:
                 self._handle_utterance(utt)
             except Exception as e:
                 print(f"[voice] process error: {e}", flush=True)
+
+    def _sync_model_to_dota(self, tr) -> None:
+        """Hold the weights only while there is a game to hear.
+
+        Runs on the idle branch of the process loop, so it never delays
+        an utterance that is already waiting.
+        """
+        now = time.monotonic()
+        if self._dota_running():
+            self._dota_gone_at = 0.0
+            if not tr.is_loaded:
+                print("[voice] Dota started — reloading model.", flush=True)
+                if not tr.load():
+                    print(f"[voice] reload failed: {tr.last_error}", flush=True)
+            return
+        if not tr.is_loaded:
+            return
+        if not self._dota_gone_at:
+            self._dota_gone_at = now
+        elif now - self._dota_gone_at >= MODEL_IDLE_RELEASE_SEC:
+            print("[voice] Dota closed — releasing model memory.", flush=True)
+            tr.release()
 
     def _handle_utterance(self, utt: np.ndarray) -> None:
         v = self._vcfg()

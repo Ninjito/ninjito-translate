@@ -50,9 +50,19 @@ from dota_ocr.typing_buffer import (
 # scoreboard even mid-sentence.
 NAV_KEYS = frozenset({VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_ESCAPE})
 
-# How often the Tk thread drains the UI queue. Fast enough that the
-# popup tracks typing, slow enough to cost nothing.
+# How often the Tk thread drains the UI queue while a chat session is
+# open. Fast enough that the popup tracks typing.
 POLL_MS = 30
+
+# And how often while it is closed. Tk charges roughly 0.3ms per timer
+# wakeup, so draining an empty queue 33 times a second cost real CPU for
+# the whole match, when the user is only in chat for seconds at a time.
+#
+# Nothing can be queued before the chat session opens, and the session
+# opens on the Enter that starts the message — several keystrokes before
+# the first suggestion can exist. So the slower rate is never what the
+# user is waiting on.
+IDLE_POLL_MS = 150
 
 
 class DotaForeground:
@@ -435,10 +445,16 @@ class SuggestController:
 
     # ---- Tk thread ----
 
+    def _busy(self) -> bool:
+        """Is there anything for the pump to be fast about?"""
+        return bool(self.session.is_open or self._popup_wanted
+                    or not self._ui_queue.empty())
+
     def _schedule_pump(self) -> None:
         self._pumping = True
+        delay = POLL_MS if self._busy() else IDLE_POLL_MS
         try:
-            self._pump_after = self.root.after(POLL_MS, self.pump)
+            self._pump_after = self.root.after(delay, self.pump)
         except Exception:
             self._pump_after = None
 

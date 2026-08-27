@@ -699,3 +699,184 @@ class TestDuplicateSuppression:
         vl = self._listener()
         vl._is_duplicate("они на рошане")
         assert vl._is_duplicate("они на рошане", window_sec=0.0) is False
+
+
+class TestDotaGate:
+    """Utterances captured while Dota is closed never reach the model.
+
+    The loopback stream carries all system audio, so without this gate a
+    closed game still costs several CPU-seconds per utterance to
+    transcribe the user's music and then throw it away.
+    """
+
+    def _listener(self, monkeypatch, hwnd):
+        import dota_ocr.window as window
+        monkeypatch.setattr(window, "find_dota_hwnd", lambda *a, **k: hwnd)
+        return VoiceListener(cfg={}, translator=None,
+                             on_result=lambda a, b: None)
+
+    def test_enqueues_while_dota_runs(self, monkeypatch):
+        vl = self._listener(monkeypatch, 12345)
+        vl._enqueue(np.zeros(16000, dtype=np.float32))
+        assert vl._utterances.qsize() == 1
+
+    def test_drops_while_dota_closed(self, monkeypatch):
+        vl = self._listener(monkeypatch, None)
+        vl._enqueue(np.zeros(16000, dtype=np.float32))
+        assert vl._utterances.qsize() == 0
+
+    def test_resumes_when_dota_returns(self, monkeypatch):
+        import dota_ocr.window as window
+        state = {"hwnd": None}
+        monkeypatch.setattr(window, "find_dota_hwnd",
+                            lambda *a, **k: state["hwnd"])
+        vl = VoiceListener(cfg={}, translator=None,
+                           on_result=lambda a, b: None)
+        vl._enqueue(np.zeros(16000, dtype=np.float32))
+        assert vl._utterances.qsize() == 0
+        state["hwnd"] = 999
+        vl._enqueue(np.zeros(16000, dtype=np.float32))
+        assert vl._utterances.qsize() == 1
+
+    def test_keeps_listening_when_lookup_raises(self, monkeypatch):
+        """A broken window lookup must not silently make voice deaf."""
+        import dota_ocr.window as window
+
+        def boom(*a, **k):
+            raise OSError("user32 exploded")
+
+        monkeypatch.setattr(window, "find_dota_hwnd", boom)
+        vl = VoiceListener(cfg={}, translator=None,
+                           on_result=lambda a, b: None)
+        vl._enqueue(np.zeros(16000, dtype=np.float32))
+        assert vl._utterances.qsize() == 1
+
+    def test_warning_logged_once_per_absence(self, monkeypatch, capsys):
+        vl = self._listener(monkeypatch, None)
+        for _ in range(5):
+            vl._enqueue(np.zeros(16000, dtype=np.float32))
+        out = capsys.readouterr().out
+        assert out.count("Dota not running") == 1
+
+
+class TestCpuThreads:
+    """The transcriber must not quietly grab every core on the machine."""
+
+    def test_defaults_to_three(self):
+        from dota_ocr.voice import Transcriber, DEFAULT_CPU_THREADS
+        assert DEFAULT_CPU_THREADS == 3
+        assert Transcriber().cpu_threads == 3
+
+    def test_config_value_wins(self):
+        from dota_ocr.voice import Transcriber
+        assert Transcriber(cpu_threads=2).cpu_threads == 2
+
+    def test_zero_means_let_ctranslate2_decide(self):
+        from dota_ocr.voice import Transcriber
+        assert Transcriber(cpu_threads=0).cpu_threads == 0
+
+    def test_negative_is_clamped_not_passed_through(self):
+        from dota_ocr.voice import Transcriber
+        assert Transcriber(cpu_threads=-4).cpu_threads == 0
+
+    def test_reaches_the_model(self, monkeypatch):
+        """The value must actually land on WhisperModel, not just be stored."""
+        import dota_ocr.voice as voice
+        seen = {}
+
+        class FakeModel:
+            def __init__(self, size, **kw):
+                seen.update(kw)
+                seen["size"] = size
+
+        import sys, types
+        fake = types.ModuleType("faster_whisper")
+        fake.WhisperModel = FakeModel
+        monkeypatch.setitem(sys.modules, "faster_whisper", fake)
+
+        tr = voice.Transcriber(cpu_threads=3)
+        monkeypatch.setattr(tr, "_probe", lambda m: None)
+        tr._build("cpu", "int8")
+        assert seen["cpu_threads"] == 3
+
+    def test_shipped_config_sets_it(self):
+        import json
+        from pathlib import Path
+        cfg = json.loads(
+            (Path(__file__).resolve().parent.parent / "config.json")
+            .read_text(encoding="utf-8"))
+        assert cfg["voice"]["cpu_threads"] == 3
+
+
+class TestModelIdleRelease:
+    """Whisper's ~550MB is held only while there is a game to hear."""
+
+    class FakeTr:
+        def __init__(self, loaded=True, can_load=True):
+            self.is_loaded = loaded
+            self.released = 0
+            self.loads = 0
+            self._can_load = can_load
+            self.last_error = "nope"
+
+        def release(self):
+            self.released += 1
+            self.is_loaded = False
+
+        def load(self):
+            self.loads += 1
+            self.is_loaded = self._can_load
+            return self._can_load
+
+    def _vl(self, monkeypatch, hwnd):
+        import dota_ocr.window as window
+        monkeypatch.setattr(window, "find_dota_hwnd", lambda *a, **k: hwnd)
+        return VoiceListener(cfg={}, translator=None,
+                             on_result=lambda a, b: None)
+
+    def test_keeps_model_while_dota_runs(self, monkeypatch):
+        vl = self._vl(monkeypatch, 42)
+        tr = self.FakeTr()
+        vl._sync_model_to_dota(tr)
+        assert tr.released == 0 and tr.is_loaded
+
+    def test_does_not_release_immediately_on_close(self, monkeypatch):
+        """An alt-F4-and-requeue must not pay the 5.5s reload."""
+        vl = self._vl(monkeypatch, None)
+        tr = self.FakeTr()
+        vl._sync_model_to_dota(tr)
+        assert tr.released == 0
+
+    def test_releases_after_the_idle_delay(self, monkeypatch):
+        from dota_ocr.voice import MODEL_IDLE_RELEASE_SEC
+        vl = self._vl(monkeypatch, None)
+        tr = self.FakeTr()
+        vl._sync_model_to_dota(tr)                       # starts the clock
+        vl._dota_gone_at -= (MODEL_IDLE_RELEASE_SEC + 1)  # pretend time passed
+        vl._sync_model_to_dota(tr)
+        assert tr.released == 1 and not tr.is_loaded
+
+    def test_reloads_when_dota_returns(self, monkeypatch):
+        import dota_ocr.window as window
+        state = {"hwnd": None}
+        monkeypatch.setattr(window, "find_dota_hwnd",
+                            lambda *a, **k: state["hwnd"])
+        vl = VoiceListener(cfg={}, translator=None,
+                           on_result=lambda a, b: None)
+        tr = self.FakeTr(loaded=False)
+        state["hwnd"] = 7
+        vl._sync_model_to_dota(tr)
+        assert tr.loads == 1 and tr.is_loaded
+
+    def test_does_not_thrash_reload_while_loaded(self, monkeypatch):
+        vl = self._vl(monkeypatch, 7)
+        tr = self.FakeTr(loaded=True)
+        for _ in range(10):
+            vl._sync_model_to_dota(tr)
+        assert tr.loads == 0
+
+    def test_survives_a_failed_reload(self, monkeypatch):
+        vl = self._vl(monkeypatch, 7)
+        tr = self.FakeTr(loaded=False, can_load=False)
+        vl._sync_model_to_dota(tr)      # must not raise
+        assert tr.loads == 1

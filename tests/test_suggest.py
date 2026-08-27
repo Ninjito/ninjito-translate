@@ -137,3 +137,30 @@ class TestRealDictionary:
     def test_bundled_dictionary_corrects_real_english(self):
         s = Suggester()
         assert "receive" in [x.text for x in s.suggest_word("recieve")]
+
+
+class TestIndexSize:
+    """prefix_length is a memory/CPU trade, never a quality trade.
+
+    It shrank the deletion index from 127 MB to 38 MB. These pin the
+    behaviour that made that safe, so a future bump back to 7 has to
+    justify the memory rather than the results.
+    """
+
+    def test_prefix_length_is_the_tuned_value(self):
+        from dota_ocr.suggest import Suggester
+        assert Suggester()._sym._prefix_length == 5
+
+    @pytest.mark.parametrize("typo,want", [
+        ("teh", "the"),          # transposition
+        ("smoek", "smoke"),      # transposition, Dota term
+        ("rosahn", "roshan"),    # two edits, Dota term
+        ("jungel", "jungle"),    # transposition
+        ("recieve", "receive"),  # the classic
+        ("defnd", "defend"),     # deletion
+    ])
+    def test_corrections_survive_the_smaller_index(self, typo, want):
+        from dota_ocr.suggest import Suggester
+        got = [s.text for s in Suggester().suggest_word(typo, fix=True,
+                                                        complete=True)]
+        assert want in got, f"{typo!r} -> {got}"

@@ -246,6 +246,10 @@ class Overlay:
         self.max_messages = max_messages
         self._msg_queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
         self._trigger_event = threading.Event()
+        # Whether the pending trigger came from the button/hotkey or
+        # from a timer. The worker treats the two differently.
+        self._trigger_manual = False
+        self.last_trigger_manual = True
         # (original, translated, shown_at) — the timestamp drives expiry.
         self._messages: list[tuple[str, str, float]] = []
         self._alpha = max(0.15, min(1.0, alpha))
@@ -418,6 +422,14 @@ class Overlay:
         )
         self._settings_btn.pack(side="left", padx=2, pady=2)
         self._settings_window: tk.Toplevel | None = None
+        self._settings_panel = None
+        # The tray icon, once main() attaches one.
+        self._tray = None
+        # Set when the user hides the overlay from the tray. Distinct
+        # from _auto_hidden, which tracks whether Dota has focus — the
+        # foreground tick would otherwise undo a manual hide within
+        # 400ms.
+        self._user_hidden = False
         _attach_tooltip(self._settings_btn,
                         lambda: f"Settings — hotkeys, capture, theme ({self._hk_name('settings')})")
 
@@ -588,7 +600,7 @@ class Overlay:
         self._action_defs = {
             1: {"name": "translate", "label": "Translate",
                 "vk": hotkey_vk, "mods": 0,
-                "handler": lambda: self._trigger_event.set()},
+                "handler": lambda: self._fire_trigger(manual=True)},
             2: {"name": "lock", "label": "Lock/unlock",
                 "vk": 0x4C, "mods": MOD_CTRL | MOD_SHIFT,   # Ctrl+Shift+L
                 "handler": lambda: self.root.after(0, self._on_lock_toggle)},
@@ -1008,7 +1020,7 @@ class Overlay:
 
     def _on_translate_click(self) -> None:
         self._status.configure(text="Capturing...", fg="#ffa500")
-        self._trigger_event.set()
+        self._fire_trigger(manual=True)
 
     # ---- resize / recalibrate ----
     def _on_resize_click(self) -> None:
@@ -1111,11 +1123,25 @@ class Overlay:
             except Exception as e:
                 self.set_status(f"Resize save failed: {e}", "#ff4444")
 
+    def _fire_trigger(self, manual: bool = False) -> None:
+        """Ask the worker for a capture.
+
+        `manual` marks a trigger the user asked for by name. The worker
+        gives those the retry burst and the debug frame dumps; a timer
+        tick that finds no chat has simply found no chat, and retrying it
+        three times over just burned CPU until the next tick anyway.
+        """
+        if manual:
+            self._trigger_manual = True
+        self._trigger_event.set()
+
     def wait_for_trigger(self, timeout: float = 0.5) -> bool:
         """Block until the translate button/hotkey is pressed."""
         fired = self._trigger_event.wait(timeout=timeout)
         if fired:
             self._trigger_event.clear()
+            self.last_trigger_manual = self._trigger_manual
+            self._trigger_manual = False
         return fired
 
     def set_status(self, text: str, color: str = "#555") -> None:
@@ -1141,9 +1167,61 @@ class Overlay:
         except Exception:
             pass
 
+    # ---- tray ----
+    def set_tray(self, tray) -> None:
+        self._tray = tray
+
+    def notify_tray(self) -> None:
+        """Ask the tray to re-read its checkmarks after a state change."""
+        tray = self._tray
+        if tray is not None:
+            try:
+                tray.refresh()
+            except Exception:
+                pass
+
+    def is_overlay_visible(self) -> bool:
+        return not self._user_hidden
+
+    def toggle_overlay_visible(self) -> None:
+        """Show or hide the overlay from the tray, without quitting."""
+        self._user_hidden = not self._user_hidden
+        if self._user_hidden:
+            for w in (self.root, self._logs_window, self._paste_window,
+                      self._settings_window):
+                try:
+                    if w is not None and w.winfo_exists():
+                        w.withdraw()
+                except Exception:
+                    pass
+            self._auto_hidden = True
+        else:
+            try:
+                self.root.deiconify()
+            except Exception:
+                pass
+            self._auto_hidden = False
+        self.notify_tray()
+
+    def is_voice_on(self) -> bool:
+        return bool((self._cfg or {}).get("voice", {}).get("enabled", False))
+
+    def toggle_voice_from_tray(self) -> None:
+        self._on_voice_toggle_click()
+        self.notify_tray()
+
     # ---- close ----
     def _close(self) -> None:
         self._closing = True
+        # The tray icon has to go first: this method ends in os._exit(0),
+        # which never returns, and Windows keeps drawing an icon whose
+        # owner died until something makes it repaint.
+        tray, self._tray = self._tray, None
+        if tray is not None:
+            try:
+                tray.stop()
+            except Exception:
+                pass
         # Close any auxiliary windows (logs, paste) so they don't linger
         # as orphan Toplevels after the main overlay is destroyed.
         for attr in ("_logs_window", "_paste_window", "_settings_window"):
@@ -1254,7 +1332,9 @@ class Overlay:
             dota_hwnd = find_dota_hwnd()
             is_dota_fg = bool(dota_hwnd and fg == dota_hwnd)
             is_ours_fg = fg in own_hwnds
-            should_show = is_dota_fg or is_ours_fg
+            # A hide from the tray outranks the focus rules; without this
+            # the next tick would deiconify it straight back.
+            should_show = (is_dota_fg or is_ours_fg) and not self._user_hidden
 
             if should_show and self._auto_hidden:
                 try:
@@ -1741,7 +1821,10 @@ class Overlay:
             self._render()
 
         if not self._closing:
-            self.root.after(120, self._drain)
+            # With no messages up there is nothing to expire and nothing
+            # to repaint, so the only job left is noticing a new arrival.
+            # A third of the wakeups still does that promptly.
+            self.root.after(120 if self._messages else 300, self._drain)
 
     def _render(self) -> None:
         self.text.configure(state="normal")
@@ -1860,13 +1943,16 @@ class Overlay:
 
     # ---- Settings window ----
     def _on_settings_click(self) -> None:
-        # Toggle: if already open (even if withdrawn by auto-hide), toggle/restore.
+        # Toggle: if already open (even if withdrawn by auto-hide), restore.
         if self._toggle_aux_window("_settings_window"):
             return
 
-        win = tk.Toplevel(self.root)
+        from dota_ocr.settings_window import SettingsWindow
+
+        panel = SettingsWindow(self)
+        win = panel.build()
         self._settings_window = win
-        win.title("Settings")
+        self._settings_panel = panel
         _set_dark_titlebar(win)
         try:
             if self._brand_icon is not None:
@@ -1876,341 +1962,28 @@ class Overlay:
                 win.iconbitmap(ico)
         except Exception:
             pass
-        win.configure(bg="#0a0a0a")
-        win.geometry(f"{_sz.SETTINGS_WIDTH}x{_sz.SETTINGS_HEIGHT}")
-        win.resizable(False, False)
-        win.attributes("-topmost", True)   # float above Dota on open
-
-        # ── Tabs ──────────────────────────────────────────────────────
-        style = ttk.Style(win)
-        try: style.theme_use("clam")
-        except tk.TclError: pass
-        style.configure("TNotebook", background="#0a0a0a", borderwidth=0)
-        style.configure("TNotebook.Tab",
-                        background="#1a1a1a", foreground="#bbb",
-                        padding=[12, 6], font=("Consolas", 9, "bold"))
-        style.map("TNotebook.Tab",
-                  background=[("selected", "#2a2a1a")],
-                  foreground=[("selected", "#ffd84a")])
-        nb = ttk.Notebook(win)
-        nb.pack(fill="both", expand=True, padx=8, pady=8)
-
-        tab_hk = tk.Frame(nb, bg="#0a0a0a")
-        tab_cap = tk.Frame(nb, bg="#0a0a0a")
-        tab_voice = tk.Frame(nb, bg="#0a0a0a")
-        tab_sug = tk.Frame(nb, bg="#0a0a0a")
-        tab_thm = tk.Frame(nb, bg="#0a0a0a")
-        nb.add(tab_hk,  text="Hotkeys")
-        nb.add(tab_cap, text="Capture")
-        nb.add(tab_voice, text="Voice")
-        nb.add(tab_sug, text="Suggest")
-        nb.add(tab_thm, text="Theme")
-
-        # ── Suggest tab ───────────────────────────────────────────────
-        self._build_suggest_tab(tab_sug)
-
-        # ── Hotkeys tab ───────────────────────────────────────────────
-        tk.Label(tab_hk, text="Click a hotkey to rebind it.",
-                 bg="#0a0a0a", fg="#bbbbbb",
-                 font=("Consolas", 9)).pack(anchor="w", padx=10, pady=(10, 4))
-
-        rows = tk.Frame(tab_hk, bg="#0a0a0a")
-        rows.pack(fill="both", expand=True, padx=10, pady=4)
-
-        row_widgets: dict[int, tk.Button] = {}
-
-        def _refresh_row(aid):
-            info = self._action_defs[aid]
-            row_widgets[aid].configure(
-                text=_combo_name(info["vk"], info["mods"])
-            )
-
-        def _start_capture(aid):
-            info = self._action_defs[aid]
-            btn = row_widgets[aid]
-            btn.configure(text="Press keys...  (Esc = cancel)", bg="#5a2a2a")
-            # Disable ALL global hotkeys while capturing so typing e.g.
-            # Ctrl+Shift+P here doesn't toggle the Paste window.
-            self._request_hotkey_unregister_all()
-
-            def capture(event: tk.Event):
-                keysym = event.keysym
-                if keysym == "Escape":
-                    _refresh_row(aid)
-                    btn.configure(bg="#2a2a1a")
-                    win.unbind("<Key>", bid)
-                    # Restore the previous hotkeys.
-                    self._request_hotkey_reregister()
-                    return "break"
-                # Ignore pure modifier keys.
-                if keysym in ("Control_L", "Control_R", "Shift_L",
-                              "Shift_R", "Alt_L", "Alt_R"):
-                    return "break"
-                vk = _KEYSYM_TO_VK.get(keysym)
-                if vk is None and len(keysym) == 1 and keysym.isalnum():
-                    vk = ord(keysym.upper())
-                if vk is None:
-                    btn.configure(text=f"Unsupported ({keysym})", bg="#5a2a2a")
-                    return "break"
-                mods = 0
-                if event.state & 0x0004: mods |= 0x0002  # Ctrl
-                if event.state & 0x0001: mods |= 0x0004  # Shift
-                if event.state & 0x20000: mods |= 0x0001  # Alt
-                # Commit
-                info["vk"] = vk
-                info["mods"] = mods
-                _refresh_row(aid)
-                btn.configure(bg="#2a2a1a")
-                win.unbind("<Key>", bid)
-                # Re-register all with Windows.
-                self._request_hotkey_reregister()
-                # Persist to config.json.
-                self._persist_hotkeys()
-                # Keep the Translate button label + status hint in sync.
-                if aid == 1:
-                    self._hotkey_vk = vk
-                    self._hotkey_name = _combo_name(vk, mods)
-                    try:
-                        self._btn.configure(
-                            text=f"📷 Translate ({self._hotkey_name})"
-                        )
-                    except Exception:
-                        pass
-                    self._status.configure(
-                        text=f"Press button or {self._hotkey_name} to translate",
-                        fg="#555",
-                    )
-                return "break"
-
-            bid = win.bind("<Key>", capture)
-
-        for aid, info in self._action_defs.items():
-            row = tk.Frame(rows, bg="#0a0a0a")
-            row.pack(fill="x", pady=3)
-            # Label hugs the left edge and expands so the hotkey button
-            # always sits flush against the right edge of the tab.
-            tk.Label(row, text=info["label"] + ":",
-                     bg="#0a0a0a", fg="#e0e0e0",
-                     font=("Consolas", 10), anchor="w"
-                     ).pack(side="left", fill="x", expand=True)
-            btn = tk.Button(
-                row, text=_combo_name(info["vk"], info["mods"]),
-                bg="#2a2a1a", fg="#d8d88f",
-                activebackground="#3a3a2a", activeforeground="#ffffaa",
-                font=("Consolas", 10, "bold"),
-                relief="flat", padx=10, cursor="hand2",
-                command=lambda a=aid: _start_capture(a),
-            )
-            btn.pack(side="right", padx=(6, 0))
-            row_widgets[aid] = btn
-
-        tk.Label(
-            tab_hk,
-            text="Tip: combos like Ctrl+Shift+L work globally, while\n"
-                 "F-keys alone avoid conflicting with other apps.",
-            bg="#0a0a0a", fg="#777",
-            font=("Consolas", 8), justify="left"
-        ).pack(anchor="w", padx=10, pady=(8, 10))
-
-        # ── Capture tab: auto-OCR loop + auto-translate on chat key ──
-        cfg = self._cfg or {}
-        auto_ocr_var = tk.BooleanVar(value=bool(cfg.get("auto_ocr_enabled", False)))
-        auto_int_var = tk.IntVar(value=int(cfg.get("auto_ocr_interval_sec", 5)))
-        auto_chat_var = tk.BooleanVar(value=bool(cfg.get("auto_translate_on_chat", False)))
-
-        tk.Label(tab_cap, text="Auto-OCR loop",
-                 bg="#0a0a0a", fg="#ffd84a",
-                 font=("Consolas", 10, "bold")
-                 ).pack(anchor="w", padx=12, pady=(14, 2))
-        tk.Label(tab_cap,
-                 text="When enabled, the app automatically runs OCR on\n"
-                      "the chat region every N seconds, with no hotkey press.",
-                 bg="#0a0a0a", fg="#888",
-                 font=("Consolas", 8), justify="left"
-                 ).pack(anchor="w", padx=12)
-        row_ocr = tk.Frame(tab_cap, bg="#0a0a0a")
-        row_ocr.pack(fill="x", padx=12, pady=(6, 2))
-        tk.Checkbutton(
-            row_ocr, text="Enable auto-OCR", variable=auto_ocr_var,
-            bg="#0a0a0a", fg="#e0e0e0", selectcolor="#2a2a1a",
-            activebackground="#0a0a0a", activeforeground="#ffd84a",
-            font=("Consolas", 9), borderwidth=0,
-            command=lambda: (self._set_cfg("auto_ocr_enabled", auto_ocr_var.get()),
-                             self._apply_auto_ocr()),
-        ).pack(side="left")
-        tk.Label(row_ocr, text="Interval (sec):",
-                 bg="#0a0a0a", fg="#bbb",
-                 font=("Consolas", 9)).pack(side="left", padx=(12, 2))
-        sp = tk.Spinbox(
-            row_ocr, from_=2, to=120, width=4, textvariable=auto_int_var,
-            bg="#1a1a1a", fg="#e0e0e0", insertbackground="#e0e0e0",
-            font=("Consolas", 9), relief="flat",
-            command=lambda: (self._set_cfg("auto_ocr_interval_sec", auto_int_var.get()),
-                             self._apply_auto_ocr()),
-        )
-        sp.pack(side="left")
-
-        tk.Label(tab_cap, text="Auto-translate when chat opens",
-                 bg="#0a0a0a", fg="#ffd84a",
-                 font=("Consolas", 10, "bold")
-                 ).pack(anchor="w", padx=12, pady=(16, 2))
-        tk.Label(tab_cap,
-                 text="Triggers OCR automatically the moment you press\n"
-                      "the Dota chat key (Enter), no F7 needed.",
-                 bg="#0a0a0a", fg="#888",
-                 font=("Consolas", 8), justify="left"
-                 ).pack(anchor="w", padx=12)
-        tk.Checkbutton(
-            tab_cap, text="Enable auto-translate on chat open",
-            variable=auto_chat_var,
-            bg="#0a0a0a", fg="#e0e0e0", selectcolor="#2a2a1a",
-            activebackground="#0a0a0a", activeforeground="#ffd84a",
-            font=("Consolas", 9), borderwidth=0,
-            command=lambda: (self._set_cfg("auto_translate_on_chat", auto_chat_var.get()),
-                             self._apply_auto_chat_watch()),
-        ).pack(anchor="w", padx=12, pady=(6, 2))
-
-        # ── Voice tab: loopback capture + Whisper transcription ───────
-        vblock = dict(cfg.get("voice") or {})
-        voice_on_var = tk.BooleanVar(value=bool(vblock.get("enabled", False)))
-        model_var = tk.StringVar(value=str(vblock.get("model_size", "small")))
-
-        tk.Label(tab_voice, text="Russian voice chat",
-                 bg="#0a0a0a", fg="#ffd84a",
-                 font=("Consolas", 10, "bold")
-                 ).pack(anchor="w", padx=12, pady=(12, 2))
-        tk.Label(tab_voice,
-                 text="Listens to your speakers (not your mic), transcribes\n"
-                      "Russian speech and shows it translated in the overlay.",
-                 bg="#0a0a0a", fg="#888",
-                 font=("Consolas", 8), justify="left"
-                 ).pack(anchor="w", padx=12)
-
-        tk.Checkbutton(
-            tab_voice, text="Enable voice translation",
-            variable=voice_on_var,
-            bg="#0a0a0a", fg="#e0e0e0", selectcolor="#2a2a1a",
-            activebackground="#0a0a0a", activeforeground="#ffd84a",
-            font=("Consolas", 9), borderwidth=0,
-            command=lambda: self._settings_voice_enable(voice_on_var),
-        ).pack(anchor="w", padx=12, pady=(6, 2))
-
-        # --- Output device ---
-        tk.Label(tab_voice, text="Listen to output device:",
-                 bg="#0a0a0a", fg="#bbb",
-                 font=("Consolas", 9)).pack(anchor="w", padx=12, pady=(10, 2))
-
-        try:
-            from dota_ocr import voice as _voice
-            devices = _voice.list_loopback_devices()
-        except Exception as e:
-            print(f"[voice] settings device list failed: {e}", flush=True)
-            devices = []
-
-        # Strip the " [Loopback]" suffix for display — it's an artifact of
-        # how WASAPI exposes the device, not something the user chose.
-        dev_labels = ["Default output (auto)"] + [
-            d["name"].replace(" [Loopback]", "") for d in devices
-        ]
-        cur_name = str(vblock.get("device_name", "") or "")
-        cur_label = dev_labels[0]
-        for d, label in zip(devices, dev_labels[1:]):
-            if d["name"] == cur_name:
-                cur_label = label
-                break
-        dev_var = tk.StringVar(value=cur_label)
-
-        def _on_dev_change(_evt=None):
-            picked = dev_var.get()
-            if picked == dev_labels[0]:
-                self._set_voice_cfg("device_name", "")
-                self._set_voice_cfg("device_index", None)
-            else:
-                for dd, lab in zip(devices, dev_labels[1:]):
-                    if lab == picked:
-                        self._set_voice_cfg("device_name", dd["name"])
-                        self._set_voice_cfg("device_index", dd["index"])
-                        break
-            self._settings_voice_restart()
-
-        dev_combo = ttk.Combobox(tab_voice, values=dev_labels,
-                                 textvariable=dev_var, state="readonly",
-                                 font=("Consolas", 9), width=38)
-        dev_combo.pack(anchor="w", padx=12)
-        dev_combo.bind("<<ComboboxSelected>>", _on_dev_change)
-        if not devices:
-            tk.Label(tab_voice,
-                     text="No loopback device found — voice capture "
-                          "is unavailable.",
-                     bg="#0a0a0a", fg="#ff8844",
-                     font=("Consolas", 8)).pack(anchor="w", padx=12, pady=(2, 0))
-
-        # --- Model size ---
-        tk.Label(tab_voice, text="Recognition model:",
-                 bg="#0a0a0a", fg="#bbb",
-                 font=("Consolas", 9)).pack(anchor="w", padx=12, pady=(10, 2))
-        row_model = tk.Frame(tab_voice, bg="#0a0a0a")
-        row_model.pack(fill="x", padx=12)
-        for val, desc in (("base", "fastest"),
-                          ("small", "balanced"),
-                          ("medium", "most accurate")):
-            tk.Radiobutton(
-                row_model, text=f"{val} ({desc})", variable=model_var, value=val,
-                bg="#0a0a0a", fg="#e0e0e0", selectcolor="#ffd84a",
-                activebackground="#0a0a0a", activeforeground="#ffd84a",
-                font=("Consolas", 8), borderwidth=0, indicatoron=True,
-                command=lambda v=val: (self._set_voice_cfg("model_size", v),
-                                       self._settings_voice_restart()),
-            ).pack(anchor="w")
-
-        tk.Label(tab_voice,
-                 text="Changing the model downloads it once (~150MB-1.5GB).\n"
-                      "The first line after enabling may take a few seconds.",
-                 bg="#0a0a0a", fg="#777",
-                 font=("Consolas", 8), justify="left"
-                 ).pack(anchor="w", padx=12, pady=(8, 4))
-
-        # ── Theme tab ─────────────────────────────────────────────────
-        theme_var = tk.StringVar(value=str(cfg.get("theme", "dark")))
-        tk.Label(tab_thm, text="Overlay theme",
-                 bg="#0a0a0a", fg="#ffd84a",
-                 font=("Consolas", 10, "bold")
-                 ).pack(anchor="w", padx=12, pady=(14, 4))
-        for val, label, desc in (
-            ("dark",        "Dark",        "Solid dark background (default)."),
-            ("light",       "Light",       "Light background with dark text."),
-            ("transparent", "Transparent", "Text floats with no background panel."),
-        ):
-            r = tk.Frame(tab_thm, bg="#0a0a0a")
-            r.pack(fill="x", padx=12, pady=2)
-            tk.Radiobutton(
-                r, text=label, variable=theme_var, value=val,
-                bg="#0a0a0a", fg="#e0e0e0",
-                selectcolor="#ffd84a",          # filled dot colour when selected
-                activebackground="#0a0a0a", activeforeground="#ffd84a",
-                font=("Consolas", 10, "bold"), borderwidth=0, width=12, anchor="w",
-                indicatoron=True,
-                command=lambda v=val: (self._set_cfg("theme", v),
-                                       self._apply_theme(v)),
-            ).pack(side="left")
-            tk.Label(r, text=desc, bg="#0a0a0a", fg="#777",
-                     font=("Consolas", 8)).pack(side="left", padx=6)
 
         _s_closing = {"done": False}
+
         def _settings_close(from_destroy: bool = False):
             if _s_closing["done"]:
                 return
             _s_closing["done"] = True
             self._settings_window = None
+            self._settings_panel = None
             if not from_destroy:
-                try: win.destroy()
-                except Exception: pass
-        win.bind("<Escape>",  lambda _e: _settings_close(False))
-        win.bind("<Destroy>", lambda e: (_settings_close(True) if e.widget is win else None))
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+
+        win.bind("<Escape>", lambda _e: _settings_close(False))
+        win.bind("<Destroy>",
+                 lambda e: (_settings_close(True) if e.widget is win else None))
         win.protocol("WM_DELETE_WINDOW", lambda: _settings_close(False))
 
-        # Bring the window to the foreground without stalling the Tk
-        # mainloop (same pattern used by the Paste window).
+        # Bring the window forward without stalling the Tk mainloop
+        # (same pattern the Paste window uses).
         def _settings_grab():
             try:
                 import ctypes as _ct
@@ -2225,9 +1998,10 @@ class Overlay:
             except Exception:
                 pass
             try:
-                self.root.after(0, lambda: _settings_finish())
+                self.root.after(0, _settings_finish)
             except Exception:
                 pass
+
         def _settings_finish():
             try:
                 if win.winfo_exists():
@@ -2237,53 +2011,9 @@ class Overlay:
                               if win.winfo_exists() else None)
             except Exception:
                 pass
+
         win.after(50, lambda: threading.Thread(
             target=_settings_grab, daemon=True).start())
-
-    # ---- Suggest tab ----
-
-    def _build_suggest_tab(self, parent) -> None:
-        """Toggles for the live typing suggestions in Dota's chat box."""
-        tk.Label(parent,
-                 text="Suggestions while you type in Dota's chat box.",
-                 bg="#0a0a0a", fg="#bbbbbb", font=("Consolas", 9)
-                 ).pack(anchor="w", padx=10, pady=(10, 2))
-        tk.Label(parent,
-                 text="↑ ↓ choose    ← → insert    Esc close",
-                 bg="#0a0a0a", fg="#777777", font=("Consolas", 8)
-                 ).pack(anchor="w", padx=10, pady=(0, 8))
-
-        rows = [
-            ("enabled", "Enable suggestions"),
-            ("fix_word", "Fix the word I'm typing"),
-            ("complete_word", "Complete the word"),
-            ("fix_sentence", "Fix the whole sentence's grammar"),
-            ("translate_live", "Translate my line to English as I type"),
-        ]
-        current = dict((self._cfg or {}).get("suggest") or {})
-        for key, label in rows:
-            default = False if key == "translate_live" else True
-            var = tk.BooleanVar(value=bool(current.get(key, default)))
-            tk.Checkbutton(
-                parent, text=label, variable=var,
-                command=lambda k=key, v=var: self._set_suggest_cfg(
-                    k, bool(v.get())),
-                bg="#0a0a0a", fg="#e0e0e0", selectcolor="#1a1a1a",
-                activebackground="#0a0a0a", activeforeground="#ffd84a",
-                font=("Consolas", 9), anchor="w", borderwidth=0,
-                highlightthickness=0,
-            ).pack(anchor="w", padx=16, pady=2)
-
-        tk.Label(parent,
-                 text="Sentence grammar needs internet; word fixes work offline.",
-                 bg="#0a0a0a", fg="#777777", font=("Consolas", 8)
-                 ).pack(anchor="w", padx=10, pady=(10, 2))
-
-        self._suggest_status = tk.Label(
-            parent, text="", bg="#0a0a0a", fg="#7bd88f",
-            font=("Consolas", 8))
-        self._suggest_status.pack(anchor="w", padx=10, pady=(2, 0))
-        self._refresh_suggest_status()
 
     def _refresh_suggest_status(self) -> None:
         lbl = getattr(self, "_suggest_status", None)
@@ -2626,7 +2356,7 @@ class Overlay:
                 if self._auto_hidden:
                     pass
                 else:
-                    self._trigger_event.set()
+                    self._fire_trigger()
             except Exception:
                 pass
             self._auto_ocr_after = self.root.after(interval * 1000, _tick)
@@ -2656,6 +2386,14 @@ class Overlay:
         self._chat_key_was_down = False
 
         def _poll():
+            # 60ms while Dota has focus, so a chat key is never missed.
+            # While it doesn't, this poll cannot do anything except
+            # reschedule itself — and paying a Tk wakeup 17 times a
+            # second to decide that was most of the app's idle cost when
+            # the user was alt-tabbed away. Back off to 4 times a second
+            # there; the foreground tick restores the fast rate the
+            # moment Dota comes back.
+            delay = 60
             try:
                 # Only listen while Dota is the foreground window, so
                 # pressing Enter in the browser or paste window doesn't
@@ -2667,13 +2405,14 @@ class Overlay:
                     if pressed and not self._chat_key_was_down:
                         # Dota just opened the chat box.  Give it a
                         # tick to render, then trigger OCR.
-                        self.root.after(350, lambda: self._trigger_event.set())
+                        self.root.after(350, self._fire_trigger)
                     self._chat_key_was_down = pressed
                 else:
                     self._chat_key_was_down = False
+                    delay = 250
             except Exception:
                 pass
-            self._chat_watch_after = self.root.after(60, _poll)
+            self._chat_watch_after = self.root.after(delay, _poll)
         self._chat_watch_after = self.root.after(60, _poll)
 
     def _persist_hotkeys(self) -> None:

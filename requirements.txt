@@ -20,3 +20,9 @@ symspellpy>=6.7.7
 # LanguageTool's HTTP API for whole-sentence grammar. deep-translator
 # already pulls requests in transitively; pin it so it's explicit.
 requests>=2.31.0
+
+# --- System tray icon ---
+# Lets the app be quit (and shown, hidden, or configured) without the
+# overlay being on screen. Pillow is already a dependency above and
+# supplies the icon image.
+pystray>=0.19.0

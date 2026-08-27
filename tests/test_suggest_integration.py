@@ -144,6 +144,30 @@ class TestRealPopupPath:
         assert geom.endswith("+300+300")
 
 
+def _toggles(widget):
+    """Every Toggle switch under `widget`, at any depth.
+
+    The panel nests them inside card -> row -> control frames, so a
+    single level of winfo_children() no longer finds them.
+    """
+    from dota_ocr.ui_theme import Toggle
+    found = []
+    for child in widget.winfo_children():
+        if isinstance(child, Toggle):
+            found.append(child)
+        found.extend(_toggles(child))
+    return found
+
+
+def _build_suggest_tab(overlay_shim, parent):
+    """Build the Suggest tab against a stand-in Overlay."""
+    from dota_ocr.settings_window import SettingsWindow
+    panel = SettingsWindow.__new__(SettingsWindow)
+    panel.overlay = overlay_shim
+    panel._build_suggest(parent)
+    return panel
+
+
 class TestSettingsTab:
     """The tab must write exactly the keys the controller reads."""
 
@@ -160,17 +184,14 @@ class TestSettingsTab:
                 written[key] = value
                 self._cfg[key] = value
 
-            _build_suggest_tab = Overlay._build_suggest_tab
             _refresh_suggest_status = Overlay._refresh_suggest_status
             _set_suggest_cfg = Overlay._set_suggest_cfg
 
         shim = Shim()
         frame = tk.Frame(tk_root)
-        shim._build_suggest_tab(frame)
+        _build_suggest_tab(shim, frame)
 
-        boxes = [w for w in frame.winfo_children()
-                 if isinstance(w, tk.Checkbutton)]
-        assert len(boxes) == 5
+        assert len(_toggles(frame)) == 5
 
         shim._set_suggest_cfg("fix_sentence", False)
         assert written["suggest"]["fix_sentence"] is False
@@ -193,7 +214,6 @@ class TestSettingsTab:
             def _set_cfg(self, key, value):
                 self._cfg[key] = value
 
-            _build_suggest_tab = Overlay._build_suggest_tab
             _refresh_suggest_status = Overlay._refresh_suggest_status
             _set_suggest_cfg = Overlay._set_suggest_cfg
 
