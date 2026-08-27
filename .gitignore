@@ -42,9 +42,13 @@ models/
 # --- Bundled Tesseract (users install their own or we ship via build.py) ---
 Tesseract-OCR/
 
-# --- Runtime debug output ---
+# --- Runtime output ---
+# history.jsonl holds captured game chat and voice transcripts -- other
+# players' messages. It must never be committed to a public repo.
 debug/
+logs/
 *.log
+*.jsonl
 
 # --- Editor / IDE ---
 .vscode/

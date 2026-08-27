@@ -9,7 +9,7 @@
   "target_language": "en",
   "idle_poll_ms": 150,
   "preprocess": true,
-  "debug": true,
+  "debug": false,
   "require_dota_foreground": false,
   "capture_mode": "printwindow",
   "dota_chat_key": "Return",
