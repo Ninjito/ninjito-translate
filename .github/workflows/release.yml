@@ -4,6 +4,15 @@ on:
   push:
     tags: ['v*']
 
+  # Lets a release be cut from the Actions tab without a terminal:
+  # Run workflow -> type the version -> the tag is created here.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without the leading v (e.g. 0.1.3)'
+        required: true
+        type: string
+
 permissions:
   contents: write
 
@@ -21,10 +30,36 @@ jobs:
           python-version: '3.13'
           cache: pip
 
-      - name: Resolve version from tag
+      - name: Resolve version
         run: |
-          "APP_VERSION=$($env:GITHUB_REF_NAME -replace '^v', '')" |
-            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $v = '${{ inputs.version }}'.Trim() -replace '^v', ''
+            if ($v -notmatch '^\d+\.\d+\.\d+$') {
+              throw "Version must look like 0.1.3 -- got '$v'"
+            }
+          } else {
+            $v = $env:GITHUB_REF_NAME -replace '^v', ''
+          }
+          "APP_VERSION=$v"     | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RELEASE_TAG=v$v"    | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Releasing v$v"
+
+      - name: Create the tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          # Never move a tag that already exists: a published version has to
+          # stay exactly what people already downloaded.
+          $existing = git ls-remote --tags origin "refs/tags/$env:RELEASE_TAG"
+          if ($existing) {
+            throw "$env:RELEASE_TAG already exists. Pick a higher version."
+          }
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a $env:RELEASE_TAG -m "Ninjito Translate $env:RELEASE_TAG"
+          # Pushed with GITHUB_TOKEN, so this does NOT re-trigger the tag
+          # trigger above -- GitHub suppresses workflow runs from events the
+          # built-in token creates. Without that, this would build twice.
+          git push origin $env:RELEASE_TAG
 
       - name: Install Python dependencies
         run: |
@@ -62,5 +97,9 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          # Named explicitly so both triggers behave identically: on a tag
+          # push this is the tag that fired, on a manual run it is the tag
+          # created above.
+          tag_name: ${{ env.RELEASE_TAG }}
           generate_release_notes: true
           files: installer/out/*.exe

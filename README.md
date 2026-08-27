@@ -90,10 +90,12 @@ python build.py
 Produces `dist/NinjitoTranslate/`. CI turns that into the released installer
 with Inno Setup — see [.github/workflows/release.yml](.github/workflows/release.yml).
 
-Releases are cut by pushing a tag:
+Releases can be cut two ways. From the browser: **Actions -> Release -> Run
+workflow**, type the version (e.g. `0.1.3`), and the tag is created for you.
+Or from a terminal:
 
 ```bash
-git tag -a v0.1.1 -m "..." && git push origin v0.1.1
+git tag -a v0.1.3 -m "..." && git push origin v0.1.3
 ```
 
 ## Notes
