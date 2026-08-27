@@ -1,8 +1,27 @@
-# Ninjito Translate
+<p align="center">
+  <img src="logo.png" alt="Ninjito Translate" width="120">
+</p>
 
-Real-time Russian → English translation for Dota 2. Reads the in-game chat
-off the screen, listens to voice chat, and suggests better words while you
-type — all in an overlay on top of the game.
+<h1 align="center">Ninjito Translate</h1>
+
+<p align="center">
+  Real-time Russian → English translation for Dota 2 — chat, voice,
+  and live typing suggestions.
+</p>
+
+<p align="center">
+  <a href="https://github.com/Ninjito/ninjito-translate/releases/latest">
+    <img src="https://img.shields.io/github/v/release/Ninjito/ninjito-translate?style=flat-square" alt="Latest release"></a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/github/license/Ninjito/ninjito-translate?style=flat-square" alt="MIT license"></a>
+  <a href="https://github.com/Ninjito/ninjito-translate/actions/workflows/tests.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/Ninjito/ninjito-translate/tests.yml?style=flat-square&label=tests" alt="Tests"></a>
+</p>
+
+---
+
+Reads the in-game chat off the screen, listens to voice chat, and suggests
+better words while you type — all in an overlay on top of the game.
 
 Windows only.
 
