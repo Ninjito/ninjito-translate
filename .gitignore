@@ -67,3 +67,6 @@ settings.local.json
 !Dota2Translate.exe
 tesseract-setup*.exe
 frame_*.png
+
+# --- Inno Setup installer output ---
+installer/out/

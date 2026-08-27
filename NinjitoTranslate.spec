@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 # Voice-chat translation drags in native libraries that PyInstaller cannot
@@ -27,8 +29,13 @@ _voice_datas += collect_data_files("faster_whisper", includes=["**/*.onnx"])
 _suggest_datas = collect_data_files("symspellpy", includes=["**/*.txt"])
 
 
+# main.py is resolved against this spec's own folder. It used to be an
+# absolute path into one particular checkout, which meant the spec only
+# built on that one machine -- CI and fresh clones could not use it.
+_root = os.path.abspath(SPECPATH)
+
 a = Analysis(
-    ['E:\\Coding\\Coding\\Sites\\projects\\dota2 translate\\main.py'],
+    [os.path.join(_root, 'main.py')],
     pathex=[],
     binaries=_voice_binaries,
     datas=[('gg.png', '.'), ('gg.ico', '.')] + _voice_datas + _suggest_datas,

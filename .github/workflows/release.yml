@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # PyInstaller does not cross-compile: a Windows EXE has to be built on
+    # Windows. Everything below therefore runs in PowerShell.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Resolve version from tag
+        run: |
+          "APP_VERSION=$($env:GITHUB_REF_NAME -replace '^v', '')" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.19.0
+
+      - name: Install Tesseract OCR
+        run: |
+          choco install tesseract --no-progress -y
+          # The whole point of the app is Russian -> English, and the
+          # chocolatey package ships only eng/osd. build.py warns loudly
+          # about this rather than failing, so fetch it explicitly.
+          $tessdata = 'C:\Program Files\Tesseract-OCR\tessdata'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://github.com/tesseract-ocr/tessdata/raw/main/rus.traineddata' `
+            -OutFile "$tessdata\rus.traineddata"
+
+      - name: Build portable app
+        # Produces dist/NinjitoTranslate/. The Whisper model is not bundled:
+        # there is no models/ folder in a fresh checkout, so build.py skips
+        # it and the app downloads it on first voice use. That keeps the
+        # release asset in the hundreds of MB instead of ~1.8 GB.
+        run: python build.py
+
+      - name: Build Windows installer
+        run: |
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          & $iscc "/DAppVersion=$env:APP_VERSION" installer\NinjitoTranslate.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+          Get-ChildItem installer\out
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: installer/out/*.exe
