@@ -9,7 +9,7 @@ Windows only.
 ## Download
 
 Grab the installer from the
-[latest release](https://github.com/Ninjito/Dota2_Translator/releases/latest).
+[latest release](https://github.com/Ninjito/ninjito-translate/releases/latest).
 Run it, launch Dota, and you're going.
 
 It installs per-user (no admin prompt) and everything it needs is bundled,
@@ -67,8 +67,8 @@ Requires **Python 3.10+** and **Tesseract OCR** with the Russian language
 data.
 
 ```bash
-git clone https://github.com/Ninjito/Dota2_Translator.git
-cd Dota2_Translator
+git clone https://github.com/Ninjito/ninjito-translate.git
+cd ninjito-translate
 pip install -r requirements.txt
 ```
 
